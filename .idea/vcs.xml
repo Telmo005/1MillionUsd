@@ -2,7 +2,6 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../1MillionUsd-2024-09" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/1MillionUsd-2024-09" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/trading_bot_env/Lib/site-packages/iqoptionapi" vcs="Git" />
   </component>
 </project>

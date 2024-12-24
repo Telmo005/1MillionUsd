@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 EMAIL = "telmo.sigauquejr@gmail.com"
 PASSWORD = "telmo005"
 ASSET = "GBPUSD-OTC"
-INTERVAL = 5  # Intervalo de tempo dos candles
+INTERVAL = 1  # Intervalo de tempo dos candles
 COUNT = 200  # Quantidade de candles
 TRADE_AMOUNT = 1  # Valor da operação
 

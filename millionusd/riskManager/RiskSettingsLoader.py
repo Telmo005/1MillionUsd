@@ -3,11 +3,11 @@ import os
 
 
 class RiskSettingsLoader:
-    def __init__(self, file_name='RiskManagerConfigFile.txt', config_dir='data'):
+    def __init__(self, file_name='RiskManagerConfigFile.txt', config_dir='config_files'):
         """
         Inicializa o carregador de configurações de risco.
         :param file_name: Nome do arquivo de configuração (padrão: 'RiskManagerConfigFile.txt').
-        :param config_dir: Diretório onde o arquivo de configuração está localizado (padrão: 'data').
+        :param config_dir: Diretório onde o arquivo de configuração está localizado (padrão: 'config_files').
         """
         # Definir o caminho dinâmico baseado no diretório raiz do projeto
         project_root = os.path.dirname(os.path.abspath(__file__))

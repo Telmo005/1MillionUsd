@@ -1,0 +1,9 @@
+{
+    "email": "telmo.sigauquejr@gmail.com",
+    "password": "telmo005",
+    "asset": "GBPUSD-OTC",
+    "interval": 1,
+    "trade_amount": 1000,
+    "duration": 1,
+    "new_key": "new_value"
+}
