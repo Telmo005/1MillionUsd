@@ -49,8 +49,13 @@ class IQOptionClient:
         if self.connection:
             try:
                 logging.info(f"{Fore.LIGHTWHITE_EX}Encerrando a sessão...")
-                self.connection.logout()
+                # Fechar conexão manualmente (se necessário, dependendo da implementação da biblioteca)
+                self.connection.api.close()
+                self.connection = None
                 logging.info(f"{Fore.LIGHTGREEN_EX}Sessão encerrada com sucesso.")
+            except AttributeError:
+                logging.warning(f"{Fore.LIGHTYELLOW_EX}A API não suporta logout explícito. Apenas desconectando.")
+                self.connection = None
             except Exception as e:
                 logging.exception(f"{Fore.LIGHTRED_EX}Erro ao encerrar a sessão: {e}")
         else:
@@ -88,28 +93,39 @@ class IQOptionClient:
             self.otc_cache = [asset for asset in self.assets_cache if "OTC" in asset["name"]]
 
             logging.info(f"{Fore.LIGHTGREEN_EX}Cache atualizado com sucesso: {len(self.assets_cache)} ativos.")
+            return self.assets_cache
         except Exception as e:
             logging.exception(f"{Fore.LIGHTRED_EX}Erro ao atualizar cache de ativos: {e}")
             self.assets_cache = []
             self.otc_cache = []
 
-    def get_available_assets(self) -> list:
+    def trade(self, active: str, duration: int, amount: float, action: str):
         """
-        Retorna uma lista de ativos disponíveis para negociação.
-        :return: lista de ativos disponíveis ou lista vazia em caso de erro.
+        Realiza uma operação de compra ou venda na IQ Option.
+        :param active: Ativo para operar, ex: "EURUSD".
+        :param duration: Duração da operação em minutos (1 ou 5).
+        :param amount: Valor da operação.
+        :param action: "call" para compra ou "put" para venda.
         """
-        if self.assets_cache is None:
-            self.update_assets_cache()
-        return self.assets_cache
+        try:
+            logging.info(
+                f"{Fore.LIGHTWHITE_EX}Iniciando operação: Ativo={active}, Duração={duration}, Valor={amount}, Ação={action}.")
+            status, operation_id = self.connection.buy_digital_spot(active, amount, action, duration)
+            if operation_id == "error":
+                logging.error(f"{Fore.LIGHTRED_EX}Erro ao iniciar operação. Por favor, tente novamente.")
+                return
 
-    def get_otc_assets(self) -> list:
-        """
-        Retorna uma lista de ativos OTC disponíveis para negociação.
-        :return: Lista de ativos OTC ou lista vazia em caso de erro.
-        """
-        if self.otc_cache is None:
-            self.update_assets_cache()
-        return self.otc_cache
+            while True:
+                check, profit = self.connection.check_win_digital_v2(operation_id)
+                if check:
+                    break
+
+            if profit < 0:
+                logging.warning(f"{Fore.LIGHTYELLOW_EX}Operação finalizada. Resultado: Perda de {abs(profit)}$.")
+            else:
+                logging.info(f"{Fore.LIGHTGREEN_EX}Operação finalizada. Resultado: Lucro de {profit}$.")
+        except Exception as e:
+            logging.exception(f"{Fore.LIGHTRED_EX}Erro ao realizar operação: {e}")
 
     def __enter__(self):
         """

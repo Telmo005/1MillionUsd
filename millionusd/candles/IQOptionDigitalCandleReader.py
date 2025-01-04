@@ -61,3 +61,43 @@ class IQOptionDigitalCandleReader:
             self.logger.error(f"Erro ao ler candles digitais: {e}")
             return None
 
+    def start_candles_stream(self, asset, interval, maxdict=10):
+        """
+        Inicia o stream de candles em tempo real para o ativo especificado e retorna o estado da inicialização.
+
+        :param asset: O ativo/par de moedas (ex: 'EURUSD').
+        :param interval: O intervalo de tempo dos candles em segundos ou minutos.
+        :param maxdict: Número máximo de candles a serem mantidos no buffer.
+        :return: True se o stream foi iniciado com sucesso, False caso contrário.
+        """
+        try:
+            self.logger.info(f"Iniciando stream de candles para {asset} com intervalo de {interval}s.")
+            self.iq_option_client.connection.start_candles_stream(asset, interval, maxdict)
+        except Exception as e:
+            self.logger.error(f"Erro ao tentar iniciar o stream de candles para {asset}: {str(e)}", exc_info=True)
+            return False
+
+    def get_realtime_candles(self, goal, size):
+        """
+        Inicia o stream de candles e retorna os candles mais recentes para o ativo especificado.
+
+        :param goal: O ativo/par de moedas (ex: 'EURUSD').
+        :param size: O intervalo de tempo dos candles em segundos ou minutos.
+        :param maxdict: Número máximo de candles a serem mantidos no buffer (padrão: 10).
+        :return: Uma lista de candles mais recentes ou None em caso de falha.
+        """
+        try:
+
+            # Obtém os candles mais recentes
+            candles = self.iq_option_client.connection.get_realtime_candles(goal, size)
+
+            if candles:
+                self.logger.info(f"Capturados {len(candles)} candles para {goal}.")
+                return candles
+            else:
+                self.logger.warning(f"Nenhum candle foi capturado para {goal}.")
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Erro ao capturar candles para {goal} com intervalo {size}s: {str(e)}", exc_info=True)
+            return None

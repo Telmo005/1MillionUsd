@@ -1,14 +1,12 @@
 import logging
 import os
-import time
 
 from colorama import init, Fore
 
 from millionusd.IQOptionClient import IQOptionClient
-from iqoptionapi.stable_api import IQ_Option
 
 from millionusd.candles.IQOptionDigitalCandleReader import IQOptionDigitalCandleReader
-from millionusd.indicators.CandleAnalyzer import CandleAnalyzer
+from millionusd.engine.IndicatorAnalyzer import IndicatorAnalyzer
 from millionusd.riskManager.IQOptionRiskManager import IQOptionRiskManager
 from millionusd.trader.IQOptionTrader import IQOptionTrader
 
@@ -52,7 +50,7 @@ def run_trading_bot():
                     current_candle = candles[-1]
 
                     # Instanciar o analisador de candles
-                    analyzer = CandleAnalyzer(current_candle, candles)
+                    analyzer = IndicatorAnalyzer(current_candle, candles)
 
                     ema5 = analyzer.calculate_ema(5)[-1]
                     ema10 = analyzer.calculate_ema(10)[-1]

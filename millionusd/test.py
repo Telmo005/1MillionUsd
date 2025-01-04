@@ -6,7 +6,7 @@ from colorama import init, Fore
 
 from millionusd.IQOptionClient import IQOptionClient
 from millionusd.candles.IQOptionDigitalCandleReader import IQOptionDigitalCandleReader
-from millionusd.indicators.CandleAnalyzer import CandleAnalyzer
+from millionusd.engine.IndicatorAnalyzer import IndicatorAnalyzer
 from millionusd.riskManager.IQOptionRiskManager import IQOptionRiskManager
 from millionusd.trader.IQOptionTrader import IQOptionTrader
 
@@ -37,7 +37,7 @@ def detect_trend_and_place_trade(candle_reader, trader):
 
     if candles:
         current_candle = candles[-1]
-        analyzer = CandleAnalyzer(current_candle, candles)
+        analyzer = IndicatorAnalyzer(current_candle, candles)
 
         # Calcula as médias móveis
         short_ema = analyzer.calculate_ema(period=12)
