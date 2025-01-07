@@ -61,6 +61,7 @@ def run_engine():
 
                     extreme_assets = analyzer.get_asset_with_extreme_candles(moving_average_patterns)
                     asset_with_min = extreme_assets.get("asset_with_min_candles")
+                    print(extreme_assets)
 
                     config['asset'] = asset_with_min
                     vld_best_asset = False

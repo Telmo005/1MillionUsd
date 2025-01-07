@@ -1,10 +1,12 @@
 {
     "email": "telmo.sigauquejr@gmail.com",
     "password": "telmo005",
-    "asset": "GER30-OTC",
+    "asset": "EURTHB-OTC",
     "interval": 60,
     "trade_amount": 1000,
     "count": 100,
     "get_patter_1": false,
-    "new_key": "new_value"
+    "new_key": "new_value",
+    "trend_min": "baixa",
+    "valid_trend": true
 }

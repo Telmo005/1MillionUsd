@@ -22,9 +22,8 @@ class IndicatorAnalyzer:
         prices = self.get_prices()
         return talib.SMA(np.array(prices), timeperiod=period)
 
-    def calculate_ema(self, period):
-        prices = self.get_prices()
-        return talib.EMA(np.array(prices), timeperiod=period)
+    def calculate_ema(self, prices, period):
+        return talib.EMA(prices, timeperiod=period)
 
     def calculate_macd(self, short_period=12, long_period=26, signal_period=9):
         prices = self.get_prices()
