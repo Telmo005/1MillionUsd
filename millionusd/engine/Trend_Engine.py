@@ -1,4 +1,5 @@
 import logging
+import os
 from enum import Enum
 from typing import Any
 
@@ -8,7 +9,6 @@ from colorama import Fore, init
 from millionusd.IQOptionClient import IQOptionClient
 from millionusd.candles.Candle import Candle
 from millionusd.candles.IQOptionDigitalCandleReader import IQOptionDigitalCandleReader
-from millionusd.engine import ConfigFileManager
 from millionusd.engine.IndicatorAnalyzer import IndicatorAnalyzer
 
 # Inicializa o Colorama
@@ -17,6 +17,16 @@ init(autoreset=True)
 # Configuração do Logger
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Carregando configurações do ambiente/config file
+config = {
+    "email": os.getenv("IQ_OPTION_EMAIL", "telmo.sigauquejr@gmail.com"),
+    "password": os.getenv("IQ_OPTION_PASSWORD", "telmo005"),
+    "asset": os.getenv("IQ_OPTION_ASSET", "USDMXN-OTC-L"),
+    "amount": int(os.getenv("IQ_OPTION_AMOUNT", 1000)),
+    "duration": int(os.getenv("IQ_OPTION_DURATION", 1)),
+    "config_path": os.getenv("CONFIG_PATH", "../../config_files/FileConfig.json"),
+}
 
 
 class TradeDirection(Enum):
@@ -29,16 +39,8 @@ class TradeDirection(Enum):
 class TradingBot:
     """Classe responsável por executar o bot de trading."""
 
-    def __init__(self, config_path: str):
-        self.config_manager = ConfigFileManager.ConfigFileManager(config_path)
-        self.config = self._load_config()
-
-    def _load_config(self) -> dict:
-        """Carrega as configurações do arquivo."""
-        self.log_info("Carregando configurações do arquivo de configuração...")
-        config = self.config_manager.read_config()
-        self.log_info("Configurações carregadas com sucesso.")
-        return config
+    def __init__(self, config: dict):
+        self.config = config
 
     def log_info(self, message: str) -> None:
         """Log de informações com texto em branco."""
@@ -51,10 +53,11 @@ class TradingBot:
     def execute_trade(self, iq_client: IQOptionClient, direction: TradeDirection) -> None:
         """Executa uma operação na IQ Option."""
         asset = self.config.get("asset")
-        amount = self.config.get("amount", 1000)
-        duration = self.config.get("duration", 1)
+        amount = self.config.get("amount")
+        duration = self.config.get("duration")
 
-        self.log_info(f"Iniciando trade: {direction.value.upper()} | Ativo: {asset} | Valor: {amount} | Duração: {duration}m")
+        self.log_info(
+            f"Iniciando trade: {direction.value.upper()} | Ativo: {asset} | Valor: {amount} | Duração: {duration}m")
         iq_client.trade(asset, duration, amount, direction.value)
         self.log_info(f"Trade '{direction.value.upper()}' executado com sucesso para o ativo {asset}.")
 
@@ -106,7 +109,6 @@ class TradingBot:
                 self.execute_trade(iq_client, direction)
         else:
             self.log_info("Candle anterior tocou uma das linhas EMA. Nenhuma ação será tomada.")
-            #self.config_manager.write_config("valid_trend", False)
 
     def run(self) -> None:
         """Executa o bot de trading."""
@@ -124,14 +126,12 @@ class TradingBot:
                     try:
                         self.log_info("Obtendo candles em tempo real...")
                         candles = candle_reader_factory.get_realtime_candles(self.config.get("asset"), interval)
-                        self.config = self._load_config()
                         self.analyze_and_trade(iq_client, candles)
                     except Exception as e:
                         self.log_error(f"Erro ao processar candles: {str(e)}. Reiniciando...")
         except Exception as e:
             self.log_error(f"Erro ao inicializar o cliente IQ Option: {str(e)}.")
 
-
 if __name__ == "__main__":
-    bot = TradingBot(config_path="../../config_files/FileConfig.json")
+    bot = TradingBot(config)
     bot.run()
