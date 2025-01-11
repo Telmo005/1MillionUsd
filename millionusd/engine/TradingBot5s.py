@@ -1,11 +1,11 @@
 import logging
 import os
-import time
 from enum import Enum
-from typing import Any, List
+from typing import List, Tuple
 from datetime import datetime
 import numpy as np
 from colorama import Fore, init
+from typing import Any, List
 
 from millionusd.IQOptionClient import IQOptionClient
 from millionusd.candles.Candle import Candle
@@ -40,16 +40,14 @@ class TradingBot:
 
     def __init__(self, config: dict):
         self.config = config
-        self.uptrend_count = 0  # Contador para curvaturas para cima
-        self.downtrend_count = 0  # Contador para curvaturas para baixo
-        self.asset = self.config.get("asset")
+        self.previous_ema = None
 
-    def log_info(self, message: str) -> None:
-        """Log de informações com texto em branco."""
+    @staticmethod
+    def log_info(message: str) -> None:
         logger.info(f"{Fore.WHITE}{message}")
 
-    def log_error(self, message: str) -> None:
-        """Log de erros com texto em vermelho."""
+    @staticmethod
+    def log_error(message: str) -> None:
         logger.error(f"{Fore.LIGHTRED_EX}{message}")
 
     def execute_trade(self, iq_client: IQOptionClient, direction: TradeDirection) -> None:
@@ -59,63 +57,76 @@ class TradingBot:
         duration = self.config.get("duration")
 
         self.log_info(f"Iniciando operação: {direction.value.upper()} | Ativo: {asset} | Valor: {amount} | Duração: {duration}m")
-        iq_client.trade(asset, duration, amount, direction.value)
-        self.log_info(f"Operação '{direction.value.upper()}' executada com sucesso no ativo {asset}.")
 
-    def detect_curvatures(self, ema: List[float], times: List[datetime]) -> None:
-        """Detecta as curvaturas no EMA e registra data e hora."""
+        try:
+            iq_client.trade(asset, duration, amount, direction.value)
+            self.log_info(f"Operação '{direction.value.upper()}' executada com sucesso no ativo {asset}.")
+        except Exception as e:
+            self.log_error(f"Erro ao executar operação '{direction.value.upper()}': {str(e)}")
+
+    @staticmethod
+    def detect_curvatures(ema: np.ndarray, times: List[datetime]) -> List[Tuple[str, datetime, float]]:
+        """Detecta curvaturas na EMA e retorna uma lista com picos e vales."""
+        curvatures = []
         for i in range(1, len(ema) - 1):
-            if ema[i - 1] < ema[i] > ema[i + 1]:  # Pico
-                self.uptrend_count += 1
-                # Adiciona a data e hora do pico detectado
-                self.log_info(f"{Fore.GREEN}Pico detectado - Ativo: {self.asset}, Hora: {times[i]}, EMA: {ema[i]}")
-            elif ema[i - 1] > ema[i] < ema[i + 1]:  # Vale
-                self.downtrend_count += 1
-                # Adiciona a data e hora do vale detectado
-                self.log_info(f"{Fore.RED}Vale detectado - Ativo: {self.asset}, Hora: {times[i]}, EMA: {ema[i]}")
+            if ema[i - 1] < ema[i] > ema[i + 1]:
+                curvatures.append(("Pico", times[i], ema[i]))
+            elif ema[i - 1] > ema[i] < ema[i + 1]:
+                curvatures.append(("Vale", times[i], ema[i]))
+        return curvatures
 
     def analyze_and_trade(self, iq_client: IQOptionClient, candles: Any) -> None:
         """Analisa os candles para identificar curvaturas nas EMAs e executa operações."""
         self.log_info("Iniciando análise de candles...")
+
         data = Candle().read(candles)
         close_prices = np.array(data['close'])
-        times = data['timestamp']  # Supondo que os timestamps estejam em data['timestamp']
+        times = data['from']
 
         analyzer = IndicatorAnalyzer(data)
-        ema_values = analyzer.calculate_ema(close_prices, 10)  # Calculando EMA com 10 períodos
+        ema = analyzer.calculate_ema(close_prices, 10)
 
-        self.log_info(f"Valores EMA calculados: {ema_values[-3:]}")  # Exibindo as últimas 3 EMAs
+        curvatures = self.detect_curvatures(ema, times)
 
-        # Detecta as curvaturas e executa o trade correspondente
-        self.detect_curvatures(ema_values, times)
+        for curvature_type, time, value in curvatures:
 
-        if self.uptrend_count > self.downtrend_count:
-            self.execute_trade(iq_client, TradeDirection.CALL)
-        elif self.downtrend_count > self.uptrend_count:
-            self.execute_trade(iq_client, TradeDirection.PUT)
-        else:
-            self.log_info("Nenhuma operação foi realizada devido à ausência de tendências claras.")
+            # Converte o timestamp para datetime
+            timestamp_datetime = datetime.fromtimestamp(time)
+            # Formata o datetime para o formato desejado
+            formatted_time = timestamp_datetime.strftime("%d-%m-%Y %H:%M:%S")
+
+
+            if curvature_type == "Pico":
+                self.log_info(f"{Fore.GREEN}Pico detectado - Hora: {formatted_time}, EMA: {value}")
+                self.execute_trade(iq_client, TradeDirection.CALL)
+            elif curvature_type == "Vale":
+                self.log_info(f"{Fore.RED}Vale detectado - Hora: {formatted_time}, EMA: {value}")
+                self.execute_trade(iq_client, TradeDirection.PUT)
+
+        self.previous_ema = ema
 
     def run(self) -> None:
         """Executa o bot de trading."""
         self.log_info("Inicializando o bot de trading...")
+
         try:
             with IQOptionClient(self.config.get("email"), self.config.get("password")) as iq_client:
                 self.log_info("Cliente IQ Option conectado com sucesso.")
 
-                interval = 60  # 1 minuto
-                candle_reader_factory = IQOptionDigitalCandleReader(iq_client)
+                interval = 5  # Intervalo de tempo para os candles
+                candle_reader = IQOptionDigitalCandleReader(iq_client)
                 iq_client.update_assets_cache()
-                candle_reader_factory.start_candles_stream(self.config.get("asset"), interval, 100)
+
+                candle_reader.start_candles_stream(self.config.get("asset"), interval, 100)
 
                 while True:
                     try:
                         self.log_info("Obtendo candles em tempo real...")
-                        candles = candle_reader_factory.get_realtime_candles(self.config.get("asset"), interval)
+                        candles = candle_reader.get_realtime_candles(self.config.get("asset"), interval)
                         self.analyze_and_trade(iq_client, candles)
-                        time.sleep(1)
                     except Exception as e:
                         self.log_error(f"Erro ao processar candles: {str(e)}. Reiniciando...")
+
         except Exception as e:
             self.log_error(f"Erro ao inicializar o cliente IQ Option: {str(e)}.")
 

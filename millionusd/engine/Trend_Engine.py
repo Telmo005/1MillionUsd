@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 config = {
     "email": os.getenv("IQ_OPTION_EMAIL", "telmo.sigauquejr@gmail.com"),
     "password": os.getenv("IQ_OPTION_PASSWORD", "telmo005"),
-    "asset": os.getenv("IQ_OPTION_ASSET", "USDMXN-OTC-L"),
+    "asset": os.getenv("IQ_OPTION_ASSET", "SEIUSD-OTC"),
     "amount": int(os.getenv("IQ_OPTION_AMOUNT", 1000)),
     "duration": int(os.getenv("IQ_OPTION_DURATION", 1)),
     "config_path": os.getenv("CONFIG_PATH", "../../config_files/FileConfig.json"),
