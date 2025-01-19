@@ -1,4 +1,6 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 from colorama import init, Fore
 from iqoptionapi.stable_api import IQ_Option
@@ -99,33 +101,107 @@ class IQOptionClient:
             self.assets_cache = []
             self.otc_cache = []
 
+    def subscribe_to_strike_list(self, active, duration):
+        """Inscreve o ativo na lista de strikes."""
+        try:
+            self.connection.subscribe_strike_list(active, duration)
+            logging.info(f"[{datetime.now()}] Ativo {active} inscrito para a duração {duration} minutos.")
+        except Exception as e:
+            logging.error(f"[{datetime.now()}] Erro ao inscrever no strike list para {active}: {e}")
+
+    def unsubscribe_from_strike_list(self, active, duration):
+        """Cancela a inscrição do ativo para liberar recursos."""
+        try:
+            self.connection.unsubscribe_strike_list(active, duration)
+            logging.info(f"[{datetime.now()}] Ativo {active} desinscrito com sucesso.")
+        except Exception as e:
+            logging.error(f"[{datetime.now()}] Erro ao cancelar inscrição do strike list para {active}: {e}")
+
+    def execute_trade(self, active, amount, action, duration):
+        """Executa a operação de compra ou venda na IQ Option."""
+        try:
+            status, operation_id = self.connection.buy_digital_spot(active, amount, action, duration)
+            if operation_id == "error":
+                logging.error(f"[{datetime.now()}] Erro ao iniciar operação para {active}. Tentando novamente.")
+                return None
+            logging.info(f"[{datetime.now()}] Operação iniciada com sucesso. ID da operação: {operation_id}.")
+            return operation_id
+        except Exception as e:
+            logging.error(f"[{datetime.now()}] Erro ao executar a operação para {active}: {e}")
+            return None
+
+    def monitor_trade(self, operation_id):
+        """Monitora o status da operação."""
+        while True:
+            # Verifica o lucro/perda atual e status da operação
+            check, profit = self.connection.check_win_digital_v2(operation_id)
+            if check:
+                break
+
+        return profit
+
     def trade(self, active: str, duration: int, amount: float, action: str):
         """
         Realiza uma operação de compra ou venda na IQ Option.
+
         :param active: Ativo para operar, ex: "EURUSD".
         :param duration: Duração da operação em minutos (1 ou 5).
         :param amount: Valor da operação.
         :param action: "call" para compra ou "put" para venda.
         """
+        profit = 0
         try:
+            #self.subscribe_to_strike_list(active, duration)
+
             logging.info(
-                f"{Fore.LIGHTWHITE_EX}Iniciando operação: Ativo={active}, Duração={duration}, Valor={amount}, Ação={action}.")
-            status, operation_id = self.connection.buy_digital_spot(active, amount, action, duration)
-            if operation_id == "error":
-                logging.error(f"{Fore.LIGHTRED_EX}Erro ao iniciar operação. Por favor, tente novamente.")
+                f"[{datetime.now()}] Iniciando operação: Ativo={active}, Duração={duration} minutos, Valor={amount}$, "
+                f"Ação={action}.")
+
+            operation_id = self.execute_trade(active, amount, action, duration)
+            if not operation_id:
                 return
 
-            while True:
-                check, profit = self.connection.check_win_digital_v2(operation_id)
-                if check:
-                    break
+            profit = self.monitor_trade(operation_id)
 
-            if profit < 0:
-                logging.warning(f"{Fore.LIGHTYELLOW_EX}Operação finalizada. Resultado: Perda de {abs(profit)}$.")
+            # Resultado final da operação
+            if isinstance(profit, (int, float)):
+                result_message = (
+                    f"Perda de {abs(profit)}$." if profit < 0 else f"Lucro de {profit}$."
+                )
+                logging.info(f"[{datetime.now()}] Operação finalizada. Resultado: {result_message}")
             else:
-                logging.info(f"{Fore.LIGHTGREEN_EX}Operação finalizada. Resultado: Lucro de {profit}$.")
+                logging.error(f"[{datetime.now()}] Operação finalizada com um resultado inválido: {profit}")
+
         except Exception as e:
-            logging.exception(f"{Fore.LIGHTRED_EX}Erro ao realizar operação: {e}")
+            logging.exception(f"[{datetime.now()}] Erro ao realizar operação: {e}")
+        #finally:
+            #self.unsubscribe_from_strike_list(active, duration)
+
+    def multi_monitor(self, *operation_ids):
+        """
+        Monitora várias operações ao mesmo tempo, passando os IDs como argumentos.
+
+        :param operation_ids: IDs de operações a serem monitoradas.
+        :return: Lista com os resultados (lucro/perda) de cada operação.
+        """
+        results = []
+        with ThreadPoolExecutor() as executor:
+            # Dispara múltiplas monitorizações para os IDs de operações
+            future_to_id = {
+                executor.submit(self.monitor_trade, operation_id): operation_id for operation_id in operation_ids
+            }
+            for future in as_completed(future_to_id):
+                operation_id = future_to_id[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    result_message = (
+                        f"Perda de {abs(result)}$." if result < 0 else f"Lucro de {result}$."
+                    )
+                    logging.info(f"[{datetime.now()}] Resultado para operação {operation_id}: {result_message}")
+                except Exception as e:
+                    logging.error(f"[{datetime.now()}] Erro ao monitorar operação {operation_id}: {e}")
+        return results
 
     def __enter__(self):
         """

@@ -1,7 +1,7 @@
 {
     "email": "telmo.sigauquejr@gmail.com",
     "password": "telmo005",
-    "asset": "JP225-OTC",
+    "asset": null,
     "interval": 60,
     "trade_amount": 1000,
     "count": 100,
