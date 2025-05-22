@@ -1,0 +1,342 @@
+//+------------------------------------------------------------------+
+//|                                                      ProjectName |
+//|                                      Copyright 2020, CompanyName |
+//|                                       http://www.companyname.net |
+//+------------------------------------------------------------------+
+#property strict
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+
+//--- Inputs
+input double   TamanhoLote = 0.1;
+input double   NivelStopLoss = 70;
+input double   NivelTakeProfit = 200;
+input int      InicioLinhaTendencia1 = 2;
+input int      FimLinhaTendencia1 = 0;
+input ENUM_APPLIED_PRICE FontePrecoLinha1 = PRICE_MEDIAN;
+input ENUM_APPLIED_PRICE FontePrecoFinalLinha = PRICE_CLOSE;
+input int      InicioLinhaTendencia2 = 2;
+input int      FimLinhaTendencia2 = 1;
+input ENUM_APPLIED_PRICE FontePrecoLinha2 = PRICE_MEDIAN;
+input double valorMaximoPrejuizo = -0.70;
+input double spreadMaximoPermitido = 0.00001;
+
+//--- Variáveis globais
+int      ManipuladorLinhaTendencia1 = INVALID_HANDLE;
+int      ManipuladorLinhaTendencia2 = INVALID_HANDLE;
+double   NivelFechamentoLucro = 0;
+bool     AguardarNovoCandle = false;
+datetime TempoUltimoCandle;
+CTrade   ObjetoTrade;
+
+//+------------------------------------------------------------------+
+//| Funções auxiliares                                               |
+//+------------------------------------------------------------------+
+void RemoverLinhaTendencia(int &manipulador, string nome)
+  {
+   if(manipulador != INVALID_HANDLE)
+     {
+      ObjectDelete(0, nome);
+      manipulador = INVALID_HANDLE;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+double ObterPrecoPorFonte(int deslocamento, ENUM_APPLIED_PRICE fontePreco)
+  {
+   switch(fontePreco)
+     {
+      case PRICE_CLOSE:
+         return iClose(_Symbol, _Period, deslocamento);
+      case PRICE_OPEN:
+         return iOpen(_Symbol, _Period, deslocamento);
+      case PRICE_HIGH:
+         return iHigh(_Symbol, _Period, deslocamento);
+      case PRICE_LOW:
+         return iLow(_Symbol, _Period, deslocamento);
+      case PRICE_MEDIAN:
+         return (iHigh(_Symbol, _Period, deslocamento) + iLow(_Symbol, _Period, deslocamento)) / 2;
+      case PRICE_TYPICAL:
+         return (iHigh(_Symbol, _Period, deslocamento) + iLow(_Symbol, _Period, deslocamento) + iClose(_Symbol, _Period, deslocamento)) / 3;
+      case PRICE_WEIGHTED:
+         return (iHigh(_Symbol, _Period, deslocamento) + iLow(_Symbol, _Period, deslocamento) + iClose(_Symbol, _Period, deslocamento) * 2) / 4;
+      default:
+         return iClose(_Symbol, _Period, deslocamento);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void DesenharLinhaTendencia(int &manipulador, string nome, int candleInicio, int candleFim, color cor, ENUM_APPLIED_PRICE fontePrecoInicio, ENUM_APPLIED_PRICE fontePrecoFim)
+  {
+   double precoInicio = ObterPrecoPorFonte(candleInicio, fontePrecoInicio);
+   double precoFim = ObterPrecoPorFonte(candleFim, fontePrecoFim);
+   datetime tempoInicio = iTime(_Symbol, _Period, candleInicio);
+   datetime tempoFim = iTime(_Symbol, _Period, candleFim);
+
+   RemoverLinhaTendencia(manipulador, nome);
+   manipulador = ObjectCreate(0, nome, OBJ_TREND, 0, tempoInicio, precoInicio, tempoFim, precoFim);
+
+   if(manipulador != INVALID_HANDLE)
+     {
+      ObjectSetInteger(0, nome, OBJPROP_COLOR, cor);
+      ObjectSetInteger(0, nome, OBJPROP_WIDTH, 2);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void DesenharLinhaTendenciaHorizontal(int &manipulador, string nome, int candleInicio, color cor, ENUM_APPLIED_PRICE fontePrecoInicio)
+  {
+   double precoInicio = ObterPrecoPorFonte(candleInicio, fontePrecoInicio);
+   datetime tempoInicio = iTime(_Symbol, _Period, candleInicio);
+   datetime tempoFim = iTime(_Symbol, _Period, 0) + 2 * _Period * 60;
+
+   RemoverLinhaTendencia(manipulador, nome);
+   manipulador = ObjectCreate(0, nome, OBJ_TREND, 0, tempoInicio, precoInicio, tempoFim, precoInicio);
+
+   if(manipulador != INVALID_HANDLE)
+     {
+      ObjectSetInteger(0, nome, OBJPROP_COLOR, cor);
+      ObjectSetInteger(0, nome, OBJPROP_WIDTH, 2);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Funções de negociação                                            |
+//+------------------------------------------------------------------+
+void AbrirPosicao(ENUM_POSITION_TYPE tipo, string comentario)
+  {
+   double preco = (tipo == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double stopLoss = (tipo == POSITION_TYPE_BUY) ? preco - NivelStopLoss * _Point : preco + NivelStopLoss * _Point;
+   double takeProfit = (tipo == POSITION_TYPE_BUY) ? preco + NivelTakeProfit * _Point : preco - NivelTakeProfit * _Point;
+
+   if(tipo == POSITION_TYPE_BUY)
+     {
+      ObjetoTrade.Buy(TamanhoLote, _Symbol, preco, stopLoss, takeProfit, comentario);
+     }
+   else
+     {
+      ObjetoTrade.Sell(TamanhoLote, _Symbol, preco, stopLoss, takeProfit, comentario);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void AbrirPosicaoContraria(ENUM_POSITION_TYPE tipoPosicao, string nomeLinha)
+  {
+   if(tipoPosicao == POSITION_TYPE_BUY)
+     {
+      AbrirPosicao(POSITION_TYPE_SELL, nomeLinha);
+     }
+   else
+      if(tipoPosicao == POSITION_TYPE_SELL)
+        {
+         AbrirPosicao(POSITION_TYPE_BUY, nomeLinha);
+        }
+  }
+
+//+------------------------------------------------------------------+
+//| Funções de cálculo                                              |
+//+------------------------------------------------------------------+
+double CalcularLucroPotencialTempoReal(const double tamanhoLote)
+  {
+   double maximaAnterior = iHigh(_Symbol, _Period, 1);
+   double minimaAnterior = iLow(_Symbol, _Period, 1);
+   double intervaloMedio = (maximaAnterior - minimaAnterior) / 2;
+   double valorPip = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE) * tamanhoLote;
+   return (intervaloMedio / _Point) * valorPip;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+double CalcularSpread()
+  {
+   double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   return NormalizeDouble(spread, _Digits);
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+int ContarPosicoesPorLinha(string nomeLinha)
+  {
+   int quantidade = 0;
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket) && StringFind(PositionGetString(POSITION_COMMENT), nomeLinha) != -1)
+        {
+         quantidade++;
+        }
+     }
+   return quantidade;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+bool VerificarCruzamentoCorpoCandleAnterior(double precoLinha)
+  {
+   double openAnterior = iOpen(_Symbol, _Period, 1);
+   double closeAnterior = iClose(_Symbol, _Period, 1);
+   return (precoLinha >= MathMin(openAnterior, closeAnterior) && precoLinha <= MathMax(openAnterior, closeAnterior));
+  }
+
+//+------------------------------------------------------------------+
+//| Funções principais                                               |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   TempoUltimoCandle = iTime(_Symbol, _Period, 0);
+   return INIT_SUCCEEDED;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnDeinit(const int razao)
+  {
+   RemoverLinhaTendencia(ManipuladorLinhaTendencia1, "TrendLine1");
+   RemoverLinhaTendencia(ManipuladorLinhaTendencia2, "TrendLine2");
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+
+   datetime tempoCandleAtual = iTime(_Symbol, _Period, 0);
+   if(TempoUltimoCandle != tempoCandleAtual)
+     {
+      TempoUltimoCandle = tempoCandleAtual;
+      FecharPosicoesComPrejuizo("TrendLine1", NivelFechamentoLucro);
+      AguardarNovoCandle = false;
+     }
+
+   DesenharLinhaTendencia(ManipuladorLinhaTendencia1, "TrendLine1", InicioLinhaTendencia1, FimLinhaTendencia1, clrRed, FontePrecoLinha1, FontePrecoFinalLinha);
+   DesenharLinhaTendenciaHorizontal(ManipuladorLinhaTendencia2, "TrendLine2", InicioLinhaTendencia2, clrBlue, FontePrecoLinha2);
+
+   NivelFechamentoLucro = CalcularLucroPotencialTempoReal(TamanhoLote);
+   ControleDePrejuizo("TrendLine1", NivelFechamentoLucro);
+   FecharPosicoesComLucro("TrendLine1", NivelFechamentoLucro);
+
+   if(AguardarNovoCandle)
+      return;
+
+   double spread = CalcularSpread();
+   if(spread > spreadMaximoPermitido + 1e-10) // Usando margem para segurança
+     {
+      Print("Spread atual ", DoubleToString(spread, _Digits), " > máximo permitido ", DoubleToString(spreadMaximoPermitido, _Digits));
+      return;
+     }
+
+   if(ContarPosicoesPorLinha("TrendLine1") == 0)
+     {
+      ProcessarLinhaTendencia("TrendLine1", InicioLinhaTendencia1, FimLinhaTendencia1, FontePrecoLinha1, FontePrecoFinalLinha);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void ProcessarLinhaTendencia(const string nomeLinha, int candleInicio, int candleFim,
+                             ENUM_APPLIED_PRICE fontePrecoInicio, ENUM_APPLIED_PRICE fontePrecoFim)
+  {
+   double precoLinhaRectaHorizontal = ObterPrecoPorFonte(InicioLinhaTendencia2, FontePrecoLinha2);
+   double precoAtual = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   bool tendenciaAlta = precoAtual > precoLinhaRectaHorizontal;
+
+   if(!VerificarCruzamentoCorpoCandleAnterior(precoLinhaRectaHorizontal))
+     {
+      AbrirPosicao(tendenciaAlta ? POSITION_TYPE_BUY : POSITION_TYPE_SELL, nomeLinha);
+     }
+   else
+     {
+      AbrirPosicao(tendenciaAlta ? POSITION_TYPE_SELL : POSITION_TYPE_BUY, nomeLinha);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void FecharPosicoesComLucro(string nomeLinha, double limiteLucro)
+  {
+   if(limiteLucro < 0)
+      return;
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket) &&
+         StringFind(PositionGetString(POSITION_COMMENT), nomeLinha) != -1 &&
+         PositionGetDouble(POSITION_PROFIT) >= limiteLucro)
+        {
+         ObjetoTrade.PositionClose(ticket);
+         AguardarNovoCandle = true;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void FecharPosicoesComPrejuizo(string nomeLinha, double limitePrejuizo)
+  {
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket) &&
+         StringFind(PositionGetString(POSITION_COMMENT), nomeLinha) != -1 &&
+         PositionGetDouble(POSITION_PROFIT) <= valorMaximoPrejuizo)
+        {
+        if (ContarPosicoesPorLinha(nomeLinha) < 2){
+         ObjetoTrade.PositionClose(ticket);
+         }
+        }
+     }
+  }
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void ControleDePrejuizo(string nomeLinha, double limitePrejuizo)
+  {
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket) &&
+         StringFind(PositionGetString(POSITION_COMMENT), nomeLinha) != -1 &&
+         PositionGetDouble(POSITION_PROFIT) < valorMaximoPrejuizo)
+        {
+         ENUM_POSITION_TYPE tipoPosicao = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+           {
+            if(ContarPosicoesPorLinha("TrendLine1") < 2)
+              {
+               AbrirPosicaoContraria(tipoPosicao, nomeLinha);
+               AguardarNovoCandle = true;
+              }
+           }
+        }
+     }
+  }
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Função para comparação segura de valores double                  |
+//+------------------------------------------------------------------+
+bool CompareDoubles(double value1, double value2, double epsilon=1e-10)
+  {
+   return(MathAbs(value1 - value2) < epsilon);
+  }
+//+------------------------------------------------------------------+
