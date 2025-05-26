@@ -1,0 +1,530 @@
+//+------------------------------------------------------------------+
+//|                                                      ProjectName |
+//|                                      Copyright 2020, CompanyName |
+//|                                       http://www.companyname.net |
+//+------------------------------------------------------------------+
+#property strict
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+
+//--- Inputs
+input double   LotSize = 0.1;
+input double   StopLossLevel = 200;
+input double   TakeProfitLevel = 200;
+input int      StartTrendLine1 = 2;
+input int      EndTrendLine1 = 0;
+input ENUM_APPLIED_PRICE PriceSourceLine1 = PRICE_MEDIAN;
+input ENUM_APPLIED_PRICE EndPriceSourceLine = PRICE_CLOSE;
+input int      StartTrendLine2 = 2;
+input int      EndTrendLine2 = 1;
+input ENUM_APPLIED_PRICE PriceSourceLine2 = PRICE_MEDIAN;
+input double   MaxLossValue = -1.5;
+input double   MaxAllowedSpread = 0.00001;
+input double thresholdPoints = 35; // 35 pips equivalem a 350 points (considerando 10 points por pip)
+
+//--- Global variables
+int      handleTrendLine1 = INVALID_HANDLE;
+int      handleTrendLine2 = INVALID_HANDLE;
+double   ProfitCloseLevel = 0;
+bool     WaitForNewCandle = false;
+datetime LastCandleTime;
+double tempProfit = 0.0;
+
+input bool activeUpTrend = true;
+input bool activeDownTrend = true;
+
+double lastOperationPrice = 0;
+
+
+CTrade   TradeObject;
+
+//+------------------------------------------------------------------+
+//| Helper functions                                                 |
+//+------------------------------------------------------------------+
+void RemoveTrendLine(int &handle, string name)
+  {
+   if(handle != INVALID_HANDLE)
+     {
+      ObjectDelete(0, name);
+      handle = INVALID_HANDLE;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+double GetPriceBySource(int shift, ENUM_APPLIED_PRICE priceSource)
+  {
+   switch(priceSource)
+     {
+      case PRICE_CLOSE:
+         return iClose(_Symbol, _Period, shift);
+      case PRICE_OPEN:
+         return iOpen(_Symbol, _Period, shift);
+      case PRICE_HIGH:
+         return iHigh(_Symbol, _Period, shift);
+      case PRICE_LOW:
+         return iLow(_Symbol, _Period, shift);
+      case PRICE_MEDIAN:
+         return (iHigh(_Symbol, _Period, shift) + iLow(_Symbol, _Period, shift)) / 2;
+      case PRICE_TYPICAL:
+         return (iHigh(_Symbol, _Period, shift) + iLow(_Symbol, _Period, shift) + iClose(_Symbol, _Period, shift)) / 3;
+      case PRICE_WEIGHTED:
+         return (iHigh(_Symbol, _Period, shift) + iLow(_Symbol, _Period, shift) + iClose(_Symbol, _Period, shift) * 2) / 4;
+      default:
+         return iClose(_Symbol, _Period, shift);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void DrawTrendLine(int &handle, string name, int startCandle, int endCandle, color clr, ENUM_APPLIED_PRICE startPriceSource, ENUM_APPLIED_PRICE endPriceSource)
+  {
+   double startPrice = GetPriceBySource(startCandle, startPriceSource);
+   double endPrice = GetPriceBySource(endCandle, endPriceSource);
+   datetime startTime = iTime(_Symbol, _Period, startCandle);
+   datetime endTime = iTime(_Symbol, _Period, endCandle);
+
+   RemoveTrendLine(handle, name);
+   handle = ObjectCreate(0, name, OBJ_TREND, 0, startTime, startPrice, endTime, endPrice);
+
+   if(handle != INVALID_HANDLE)
+     {
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void DrawHorizontalTrendLine(int &handle, string name, int startCandle, color clr, ENUM_APPLIED_PRICE startPriceSource)
+  {
+   double startPrice = GetPriceBySource(startCandle, startPriceSource);
+   datetime startTime = iTime(_Symbol, _Period, startCandle);
+   datetime endTime = iTime(_Symbol, _Period, 0) + 2 * _Period * 60;
+
+   RemoveTrendLine(handle, name);
+   handle = ObjectCreate(0, name, OBJ_TREND, 0, startTime, startPrice, endTime, startPrice);
+
+   if(handle != INVALID_HANDLE)
+     {
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Abre uma posição                                                 |
+//| Parâmetros:                                                      |
+//|   type - Tipo da posição (POSITION_TYPE_BUY ou POSITION_TYPE_SELL) |
+//|   comment - Comentário da posição                                |
+//+------------------------------------------------------------------+
+void OpenPosition(ENUM_POSITION_TYPE type, string comment)
+{
+   double price = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+/*
+   if(!CheckOperationDistance(price, type))
+   {
+      return;
+   }
+*/
+   // Usar _Point diretamente (já que StopLossLevel e TakeProfitLevel são em points)
+   double stopLoss = (type == POSITION_TYPE_BUY) ? price - StopLossLevel * _Point : price + StopLossLevel * _Point;
+   double takeProfit = (type == POSITION_TYPE_BUY) ? price + TakeProfitLevel * _Point : price - TakeProfitLevel * _Point;
+
+   if(type == POSITION_TYPE_BUY)
+   {
+      TradeObject.Buy(LotSize, _Symbol, price, stopLoss, takeProfit, comment);
+   }
+   else
+   {
+      TradeObject.Sell(LotSize, _Symbol, price, stopLoss, takeProfit, comment);
+   }
+
+   // Atualiza o preço da última operação
+   lastOperationPrice = price;
+}
+
+
+//+------------------------------------------------------------------+
+//|   Abrir operacoes contrarias                                     |
+//+------------------------------------------------------------------+
+void OpenOppositePosition(ENUM_POSITION_TYPE positionType, string lineName)
+  {
+   ENUM_POSITION_TYPE oppositeType = (positionType == POSITION_TYPE_BUY) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+   OpenPosition(oppositeType, lineName);
+  }
+
+//+------------------------------------------------------------------+
+//| Calcula o lucro potencial baseado na amplitude do candle anterior|
+//| e nas propriedades atuais do símbolo. Retorna 0.0 em caso de erro|
+//+------------------------------------------------------------------+
+double CalculatePotentialProfit(double lotSize)
+  {
+   double previousHigh = iHigh(_Symbol, _Period, 1);
+   double previousLow = iLow(_Symbol, _Period, 1);
+
+   if(previousHigh == 0 || previousLow == 0 || _Point == 0)
+      return 0.0;
+
+   double averageRange = (previousHigh - previousLow) / 2.0;
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickValue == 0)
+      return 0.0;
+
+   double pipValue = (tickValue * lotSize) / (_Point * 10);
+   return averageRange * pipValue;
+  }
+
+//+------------------------------------------------------------------+
+//| Calcula o spread atual do símbolo em pontos                      |
+//| Retorna:                                                         |
+//|   - Spread normalizado em pontos (ex: 15 para 1.5 pips)          |
+//|   - -1.0 em caso de erro                                         |
+//+------------------------------------------------------------------+
+double CalculateSpread()
+  {
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   if(ask <= 0 || bid <= 0 || ask <= bid)
+      return -1.0;
+
+   double rawSpread = ask - bid;
+   double spreadInPoints = rawSpread / _Point;
+
+   return NormalizeDouble(spreadInPoints, _Digits);
+  }
+
+//+------------------------------------------------------------------+
+//| Conta posições abertas contendo o nome da linha no comentário    |
+//| Parâmetros:                                                      |
+//|   lineName - Nome da linha a ser buscada nos comentários         |
+//| Retorno:                                                         |
+//|   - Número de posições que contêm o texto no comentário          |
+//|   - -1 em caso de erro crítico                                  |
+//+------------------------------------------------------------------+
+int CountPositionsByLine(string lineName)
+  {
+   int totalPositions = PositionsTotal();
+   int count = 0;
+
+   if(totalPositions == 0)
+      return 0;
+
+   if(StringLen(lineName) == 0)
+     {
+      Print("Erro: Nome da linha vazio");
+      return -1;
+     }
+
+   for(int i = totalPositions-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket <= 0)
+         continue;
+
+      if(PositionSelectByTicket(ticket))
+        {
+         string comment = PositionGetString(POSITION_COMMENT);
+         if(StringFind(comment, lineName) != -1)
+           {
+            count++;
+           }
+        }
+     }
+
+   return count;
+  }
+
+//+------------------------------------------------------------------+
+//| Verifica se o preço da linha cruzou o corpo do candle anterior   |
+//| Parâmetros:                                                      |
+//|   linePrice - Preço da linha a ser verificado                    |
+//| Retorno:                                                         |
+//|   true - Se o preço está dentro do corpo do candle               |
+//|   false - Se o preço está fora do corpo do candle ou em caso erro|
+//+------------------------------------------------------------------+
+bool CheckCrossingPreviousCandleBody(double linePrice)
+  {
+   double previousOpen = iOpen(_Symbol, _Period, 1);
+   double previousClose = iClose(_Symbol, _Period, 1);
+
+   if(previousOpen == 0 || previousClose == 0)
+     {
+      Print("Erro: Não foi possível obter dados do candle anterior");
+      return false;
+     }
+
+   double bodyHigh = MathMax(previousOpen, previousClose);
+   double bodyLow = MathMin(previousOpen, previousClose);
+
+   bool isCrossing = (linePrice >= bodyLow) && (linePrice <= bodyHigh);
+
+   return isCrossing;
+  }
+
+//+------------------------------------------------------------------+
+//| Main functions                                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   LastCandleTime = iTime(_Symbol, _Period, 0);
+   return INIT_SUCCEEDED;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   RemoveTrendLine(handleTrendLine1, "TrendLine1");
+   RemoveTrendLine(handleTrendLine2, "TrendLine2");
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   DrawTrendLine(handleTrendLine1, "TrendLine1", StartTrendLine1, EndTrendLine1, clrRed, PriceSourceLine1, EndPriceSourceLine);
+   DrawHorizontalTrendLine(handleTrendLine2, "TrendLine2", StartTrendLine2, clrBlue, PriceSourceLine2);
+
+   double spread = CalculateSpread();
+   if(spread > MaxAllowedSpread + 1e-10)
+     {
+      //Print("Current spread ", DoubleToString(spread, _Digits), " > maximum allowed ", DoubleToString(MaxAllowedSpread, _Digits));
+      return;
+     }
+
+     if (CountPositionsByLine("TrendLine1") == 0){
+     tempProfit = 0;
+     Print("Acomulatef profit rezete to: ", tempProfit);
+     }
+
+   datetime currentCandleTime = iTime(_Symbol, _Period, 0);
+   if(LastCandleTime != currentCandleTime)
+     {
+      LastCandleTime = currentCandleTime;
+      WaitForNewCandle = false;
+      
+      ProcessTrendLine("TrendLine1", StartTrendLine2, EndTrendLine2, PriceSourceLine2, EndPriceSourceLine);
+       
+      ProfitCloseLevel = CalculatePotentialProfit(LotSize);
+      ClosePositionsWithProfit("TrendLine1", ProfitCloseLevel);  
+      CloseWorstPositionWhenProfitable();
+      
+     if (CountPositionsByLine("TrendLine1") == 0){
+     tempProfit = 0;
+     Print("Acomulatef profit rezete to: ", tempProfit);
+     }
+      
+      // Redefine o preço da última operação quando um novo candle é formado
+      lastOperationPrice = 0;
+     }
+  }
+
+
+//+------------------------------------------------------------------+
+//| Processa a lógica de negociação baseada na linha de tendência    |
+//| Parâmetros:                                                      |
+//|   lineName - Nome identificador da linha                         |
+//|   startCandle, endCandle - Velas para cálculo da linha           |
+//|   startPriceSource, endPriceSource - Tipos de preço para cálculo |
+//+------------------------------------------------------------------+
+void ProcessTrendLine(const string lineName, int startCandle, int endCandle,
+                      ENUM_APPLIED_PRICE startPriceSource, ENUM_APPLIED_PRICE endPriceSource)
+  {
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double horizontalLinePrice = GetPriceBySource(StartTrendLine2, PriceSourceLine2);
+   double sma = NormalizeDouble(CalculateSMA(5), _Digits);
+
+   if(currentPrice <= 0 || horizontalLinePrice <= 0)
+     {
+      Print("Erro: Preço inválido encontrado");
+      return;
+     }
+
+   bool isNotCrossing = !CheckCrossingPreviousCandleBody(horizontalLinePrice);
+   bool aboveSMA = currentPrice > sma;
+   bool uptrend = currentPrice > horizontalLinePrice;
+
+   if(isNotCrossing)
+     {
+      if(uptrend && activeUpTrend)
+        {
+         OpenPosition(POSITION_TYPE_BUY, lineName);
+        }
+      else
+         if(!uptrend && activeDownTrend)
+           {
+            OpenPosition(POSITION_TYPE_SELL, lineName);
+           }
+     }
+   else
+     {
+      if(!uptrend && activeUpTrend)
+        {
+         OpenPosition(POSITION_TYPE_BUY, lineName);
+        }
+      else
+         if(uptrend && activeDownTrend)
+           {
+            OpenPosition(POSITION_TYPE_SELL, lineName);
+           }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+// Modificar ClosePositionsWithProfit para:
+void ClosePositionsWithProfit(string lineName, double profitLimit)
+{
+   if(profitLimit <= 0) return;
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket) &&
+         StringFind(PositionGetString(POSITION_COMMENT), lineName) != -1)
+      {
+         double positionProfit = PositionGetDouble(POSITION_PROFIT);
+         if(positionProfit >= profitLimit)
+         {
+            // Primeiro tenta fechar a posição
+            if(TradeObject.PositionClose(ticket))
+            {
+               // Só acumula se o fechamento foi bem-sucedido
+               tempProfit += positionProfit;
+               Print("[PROFIT ", positionProfit, "] Accumulated profits: ", tempProfit);
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Function to calculate the total profit of all open positions     |
+//+------------------------------------------------------------------+
+double CalculateTotalProfit()
+  {
+   double totalProfit = 0;
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         totalProfit += PositionGetDouble(POSITION_PROFIT);
+        }
+     }
+
+   return totalProfit;
+  }
+
+//+------------------------------------------------------------------+
+//| Function to close all open positions                             |
+//+------------------------------------------------------------------+
+bool CloseAllPositions()
+{
+   bool allClosed = true;
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+      {
+         if(!TradeObject.PositionClose(ticket))
+         {
+            allClosed = false;
+         }
+      }
+   }
+   return allClosed;
+}
+//+------------------------------------------------------------------+
+//| Function to calculate the SMA of 5 periods                       |
+//+------------------------------------------------------------------+
+double CalculateSMA(int periods)
+  {
+   double sum = 0;
+   for(int i = 0; i < periods; i++)
+     {
+      sum += iClose(_Symbol, _Period, i);
+     }
+   return sum / periods;
+  }
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Fecha a pior posição quando o lucro acumulado cobre sua perda    |
+//| e ajusta o lucro acumulado                                       |
+//+------------------------------------------------------------------+
+void CloseWorstPositionWhenProfitable()
+  {
+   double accumulatedProfit = tempProfit;
+   double worstLoss = 0;
+   ulong worstTicket = 0;
+   string worstComment = "";
+
+// 1. Encontrar a posição com maior prejuízo
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         double positionProfit = PositionGetDouble(POSITION_PROFIT);
+         if(positionProfit < worstLoss)
+           {
+            worstLoss = positionProfit;
+            worstTicket = ticket;
+            worstComment = PositionGetString(POSITION_COMMENT);
+           }
+        }
+     }
+
+// 2. Se o lucro acumulado cobre a pior perda:
+   if(worstTicket != 0 && accumulatedProfit > MathAbs(worstLoss))
+     {
+      // Fecha a posição
+      TradeObject.PositionClose(worstTicket);
+      double x = tempProfit;
+      // Ajusta o lucro acumulado (subtraindo o valor "gasto" para cobrir a perda)
+      tempProfit += worstLoss; // worstLoss é negativo, então isto subtrai
+
+      Print("[LIMPEZA] Posição ", worstTicket, " (", worstComment,
+            ") com perda de ", worstLoss, " fechada. ",
+            "Lucro acumulado ajustado: ", x, " Remanescente: ", tempProfit);
+     }
+  }
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Verifica se a distância entre a operação atual e a última operação na mesma direção é maior que o limiar |
+//| Parâmetros:                                                      |
+//|   currentPrice - Preço atual da operação                         |
+//|   operationType - Tipo da operação (POSITION_TYPE_BUY ou POSITION_TYPE_SELL) |
+//| Retorno:                                                         |
+//|   true - Se a distância é maior que o limiar                     |
+//|   false - Se a distância é menor ou igual ao limiar              |
+//+------------------------------------------------------------------+
+bool CheckOperationDistance(double currentPrice, ENUM_POSITION_TYPE operationType)
+{
+   if(lastOperationPrice == 0)
+   {
+      // Se não há operação anterior, permita a operação
+      return true;
+   }
+
+   double distancePoints = MathAbs(currentPrice - lastOperationPrice) / _Point;
+
+   if(distancePoints <= thresholdPoints)
+   {
+      Print("Distância entre operações é muito curta: ", distancePoints, " points");
+      return false;
+   }
+
+   return true;
+}
