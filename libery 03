@@ -1,0 +1,391 @@
+//+------------------------------------------------------------------+
+//|                      Trend Following Expert Advisor              |
+//|                        Ultra Optimized Version                   |
+//|                       Copyright 2024, Forex Systems              |
+//+------------------------------------------------------------------+
+#property strict
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+
+//--- Inputs
+input double   LotSize = 0.1;
+input double   StopLossLevel = 200;
+input double   TakeProfitLevel = 200;
+
+input int      StartTrendLine1 = 2;
+input int      EndTrendLine1 = 0;
+input ENUM_APPLIED_PRICE PriceSourceLine1 = PRICE_MEDIAN;
+input ENUM_APPLIED_PRICE EndPriceSourceLine = PRICE_CLOSE;
+
+input int      StartTrendLine2 = 2;
+//input int      EndTrendLine2 = 1;
+input ENUM_APPLIED_PRICE PriceSourceLine2 = PRICE_MEDIAN;
+
+input double   MaxLossValue = -1.5;
+input double   MaxAllowedSpread = 0.00001;
+input double   thresholdPoints = 35;
+input bool     activeUpTrend = true;
+input bool     activeDownTrend = true;
+input double   BrokerCommission = 0.4; // Commission per trade in USD
+
+//--- Global variables
+int      handleTrendLine1 = INVALID_HANDLE;
+int      handleTrendLine2 = INVALID_HANDLE;
+double   ProfitCloseLevel = 0;
+
+datetime LastCandleTime;
+double   tempProfit = 0.0;
+double   lastOperationPrice = 0;
+
+CTrade   TradeObject;
+CPositionInfo PositionInfo;
+
+// Cached values
+MqlRates currentRates[4]; // Stores current, previous, and 2nd previous candle
+double currentSpread = 0;
+double currentBid = 0;
+double currentAsk = 0;
+bool newCandle = false;
+
+//+------------------------------------------------------------------+
+//| Helper functions                                                 |
+//+------------------------------------------------------------------+
+void RemoveTrendLine(int &handle, string name)
+  {
+   if(handle != INVALID_HANDLE)
+     {
+      ObjectDelete(0, name);
+      handle = INVALID_HANDLE;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Get price with caching                                           |
+//+------------------------------------------------------------------+
+double GetPriceBySource(int shift, ENUM_APPLIED_PRICE priceSource)
+  {
+   if(shift >= ArraySize(currentRates))
+      return 0.0;
+
+   switch(priceSource)
+     {
+      case PRICE_CLOSE:
+         return currentRates[shift].close;
+      case PRICE_OPEN:
+         return currentRates[shift].open;
+      case PRICE_HIGH:
+         return currentRates[shift].high;
+      case PRICE_LOW:
+         return currentRates[shift].low;
+      case PRICE_MEDIAN:
+         return (currentRates[shift].high + currentRates[shift].low) / 2;
+      case PRICE_TYPICAL:
+         return (currentRates[shift].high + currentRates[shift].low + currentRates[shift].close) / 3;
+      case PRICE_WEIGHTED:
+         return (currentRates[shift].high + currentRates[shift].low + currentRates[shift].close * 2) / 4;
+      default:
+         return currentRates[shift].close;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Optimized trend line drawing                                     |
+//+------------------------------------------------------------------+
+void DrawTrendLine(int &handle, string name, int startCandle, int endCandle, color clr,
+                   ENUM_APPLIED_PRICE startPriceSource, ENUM_APPLIED_PRICE endPriceSource)
+  {
+   double startPrice = GetPriceBySource(startCandle, startPriceSource);
+   double endPrice = GetPriceBySource(endCandle, endPriceSource);
+
+   RemoveTrendLine(handle, name);
+   handle = ObjectCreate(0, name, OBJ_TREND, 0, currentRates[startCandle].time, startPrice,
+                         currentRates[endCandle].time, endPrice);
+
+   if(handle != INVALID_HANDLE)
+     {
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Optimized horizontal trend line                                  |
+//+------------------------------------------------------------------+
+void DrawHorizontalTrendLine(int &handle, string name, int startCandle, color clr,
+                             ENUM_APPLIED_PRICE startPriceSource)
+  {
+   double startPrice = GetPriceBySource(startCandle, startPriceSource);
+   datetime endTime = TimeCurrent() + PeriodSeconds() * 2;
+
+   RemoveTrendLine(handle, name);
+   handle = ObjectCreate(0, name, OBJ_TREND, 0, currentRates[startCandle].time, startPrice, endTime, startPrice);
+
+   if(handle != INVALID_HANDLE)
+     {
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Ultra-optimized position opening                                 |
+//+------------------------------------------------------------------+
+void OpenPosition(ENUM_POSITION_TYPE type, string comment)
+  {
+   double price = (type == POSITION_TYPE_BUY) ? currentAsk : currentBid;
+
+   if(lastOperationPrice != 0 && MathAbs(price - lastOperationPrice)/_Point <= thresholdPoints)
+     {
+      Print("Distância da operação muito curta");
+      return;
+     }
+
+   double stopLoss = (type == POSITION_TYPE_BUY) ? price - StopLossLevel * _Point
+                     : price + StopLossLevel * _Point;
+   double takeProfit = (type == POSITION_TYPE_BUY) ? price + TakeProfitLevel * _Point
+                       : price - TakeProfitLevel * _Point;
+
+   if(type == POSITION_TYPE_BUY)
+      TradeObject.Buy(LotSize, _Symbol, price, stopLoss, takeProfit, comment);
+   else
+      TradeObject.Sell(LotSize, _Symbol, price, stopLoss, takeProfit, comment);
+
+// Deduct opening commission from tempProfit
+   tempProfit -= BrokerCommission;
+   Print("Posição aberta. Comissão ", BrokerCommission, " deduzida. tempProfit atual: ", tempProfit);
+
+   lastOperationPrice = price;
+  }
+
+//+------------------------------------------------------------------+
+//| Optimized profit calculation with caching                        |
+//+------------------------------------------------------------------+
+double CalculatePotentialProfit(double lotSize)
+  {
+   double averageRange = (currentRates[1].high - currentRates[1].low) / 2.0;
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickValue == 0)
+      return 0.0;
+
+   return averageRange * ((tickValue * lotSize) / (_Point * 10));
+  }
+
+//+------------------------------------------------------------------+
+//| Optimized spread calculation                                     |
+//+------------------------------------------------------------------+
+double CalculateSpread()
+  {
+   return (currentAsk - currentBid) / _Point;
+  }
+
+//+------------------------------------------------------------------+
+//| Ultra-fast position counting with caching                        |
+//+------------------------------------------------------------------+
+int CountPositionsByLine(string lineName)
+  {
+   static int lastTotal = 0;
+   static int lastCount = 0;
+   static string lastName = "";
+
+   int currentTotal = PositionsTotal();
+   if(currentTotal == lastTotal && lineName == lastName)
+      return lastCount;
+
+   lastTotal = currentTotal;
+   lastName = lineName;
+   lastCount = 0;
+
+   for(int i = currentTotal-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         string comment = PositionGetString(POSITION_COMMENT);
+         if(StringFind(comment, lineName) != -1)
+            lastCount++;
+        }
+     }
+   return lastCount;
+  }
+
+//+------------------------------------------------------------------+
+//| Optimized candle crossing check                                  |
+//+------------------------------------------------------------------+
+bool CheckCrossingPreviousCandleBody(double linePrice)
+  {
+   double bodyHigh = MathMax(currentRates[1].open, currentRates[1].close);
+   double bodyLow = MathMin(currentRates[1].open, currentRates[1].close);
+   return (linePrice >= bodyLow) && (linePrice <= bodyHigh);
+  }
+
+//+------------------------------------------------------------------+
+//| Optimized trend line processing                                  |
+//+------------------------------------------------------------------+
+void ProcessTrendLine(const string lineName)
+  {
+   double horizontalLinePrice = GetPriceBySource(StartTrendLine2, PriceSourceLine2);
+   if(horizontalLinePrice <= 0)
+      return;
+
+//bool isNotCrossing = !CheckCrossingPreviousCandleBody(horizontalLinePrice);
+   bool uptrend = currentBid > horizontalLinePrice;
+
+   if(uptrend && activeUpTrend)
+      OpenPosition(POSITION_TYPE_BUY, lineName);
+   else
+      if(!uptrend && activeDownTrend)
+         OpenPosition(POSITION_TYPE_SELL, lineName);
+  }
+
+//+------------------------------------------------------------------+
+//| Ultra-optimized position closing with profit                     |
+//+------------------------------------------------------------------+
+void ClosePositionsWithProfit(string lineName, double profitLimit)
+  {
+   if(profitLimit <= 0)
+      return;
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(StringFind(comment, lineName) == -1)
+         continue;
+
+      double positionProfit = PositionGetDouble(POSITION_PROFIT);
+      double positionVolume = PositionGetDouble(POSITION_VOLUME);
+
+      // Calculate commission cost for closing only
+      double commissionCost = BrokerCommission * (positionVolume / LotSize);
+
+      // Only close if profit exceeds commission
+      if(positionProfit > commissionCost)
+        {
+         if(TradeObject.PositionClose(ticket))
+           {
+            tempProfit += positionProfit - commissionCost; // Deduct commission
+            Print("[LUCRO ", positionProfit, "] Após comissão ", commissionCost,
+                  ", lucro líquido: ", positionProfit - commissionCost,
+                  ". Acumulado: ", tempProfit);
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Optimized worst position closing                                 |
+//+------------------------------------------------------------------+
+void CloseWorstPositionWhenProfitable()
+  {
+   if(tempProfit <= 0)
+      return;
+
+   double worstLoss = 0;
+   ulong worstTicket = 0;
+   double worstVolume = 0;
+
+// Find the worst position
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      double positionProfit = PositionGetDouble(POSITION_PROFIT);
+      if(positionProfit >= worstLoss)
+         continue;
+
+      worstLoss = positionProfit;
+      worstTicket = ticket;
+      worstVolume = PositionGetDouble(POSITION_VOLUME);
+     }
+
+   if(worstTicket != 0)
+     {
+      // Calculate total commission cost (open + close)
+      double totalCommissionCost = 2 * BrokerCommission * (worstVolume / LotSize);
+
+      // Only close if tempProfit covers both loss AND commission
+      if(tempProfit > (MathAbs(worstLoss) + totalCommissionCost))
+        {
+         if(TradeObject.PositionClose(worstTicket))
+           {
+            double previousProfit = tempProfit;
+            tempProfit += worstLoss - totalCommissionCost; // Deduct both loss and commission
+            Print("[LIMPEZA] Posição fechada ", worstTicket,
+                  " com perda ", worstLoss, " e comissão ", totalCommissionCost,
+                  ". Lucro ajustado de ", previousProfit, " para ", tempProfit);
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                            |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   LastCandleTime = 0;
+   TradeObject.SetExpertMagicNumber(12345);
+   ArraySetAsSeries(currentRates, true);
+   return INIT_SUCCEEDED;
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization                                          |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   RemoveTrendLine(handleTrendLine1, "TrendLine1");
+   RemoveTrendLine(handleTrendLine2, "TrendLine2");
+  }
+
+//+------------------------------------------------------------------+
+//| Ultra-optimized tick processing                                  |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+// Update cached values
+   currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   currentSpread = (currentAsk - currentBid) / _Point;
+
+// Check spread first (fast exit)
+   if(currentSpread > MaxAllowedSpread + 1e-10)
+      return;
+
+// Update candle data
+   if(CopyRates(_Symbol, _Period, 0, 4, currentRates) != 4)
+      return;
+
+// Check for new candle
+   newCandle = (LastCandleTime != currentRates[0].time);
+   if(newCandle)
+     {
+      LastCandleTime = currentRates[0].time;
+
+      // Close positions
+      ClosePositionsWithProfit("TrendLine1", CalculatePotentialProfit(LotSize));
+      CloseWorstPositionWhenProfitable();
+
+      // Reset temp profit if needed
+      switch(CountPositionsByLine("TrendLine1"))
+        {
+         case 0:
+            tempProfit = 0;
+            Print("Lucro acumulado reiniciado para: ", tempProfit);
+            break;
+        }
+
+      // Process trend line
+      ProcessTrendLine("TrendLine1");
+
+      lastOperationPrice = 0;
+      DrawHorizontalTrendLine(handleTrendLine2, "TrendLine2", StartTrendLine2, clrBlue, PriceSourceLine2);
+
+     }
+  }
+//+------------------------------------------------------------------+
