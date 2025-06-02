@@ -1,0 +1,392 @@
+//+------------------------------------------------------------------+
+//|                      EA_Trade_Expert.mq5 (Corrigido)              |
+//|                        Copyright 2025, Telmo Jr.                 |
+//|                           https://www.mql5.com                   |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Telmo Jr."
+#property link      "https://www.mql5.com"
+#property version   "1.04"
+
+
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Indicators\Trend.mqh>
+
+//--- Log Levels
+enum ENUM_LOG_LEVEL
+  {
+   LOG_LEVEL_ERROR = 0,
+   LOG_LEVEL_WARNING = 1,
+   LOG_LEVEL_INFO = 2,
+   LOG_LEVEL_DEBUG = 3
+  };
+
+//--- Inputs
+input double LotSize = 0.1;
+input int StopLossPoints = 10000;
+input int TakeProfitPoints = 10000;
+input int EMA_Period = 240;
+input int MaxOperationsPerDirection = 2;
+input int max_allowed_spread = 20;
+input double unearnedProfit = 20;
+input bool stopOperations = false;
+
+input ENUM_LOG_LEVEL LogLevel = LOG_LEVEL_INFO;
+
+//--- Global Variables
+CTrade Trade;
+CPositionInfo Position;
+int emaHandle;
+datetime lastBarTime;
+double accumulatedProfit = 0.0;
+int distancePisMultiple = 1;
+bool firstTrade = true;
+double firstTimePrice = 0.0;
+
+//--- Cache Variables
+double lastEMAValue = 0.0;
+double lastBidPrice = 0.0;
+double lastAskPrice = 0.0;
+int lastSpread = 0;
+
+//+------------------------------------------------------------------+
+//| Custom logging function |
+//+------------------------------------------------------------------+
+void Log(ENUM_LOG_LEVEL level, const string message)
+  {
+   if(level > LogLevel)
+      return;
+
+   string prefix;
+   switch(level)
+     {
+      case LOG_LEVEL_ERROR:
+         prefix = "ERROR";
+         break;
+      case LOG_LEVEL_WARNING:
+         prefix = "WARNING";
+         break;
+      case LOG_LEVEL_INFO:
+         prefix = "INFO";
+         break;
+      case LOG_LEVEL_DEBUG:
+         prefix = "DEBUG";
+         break;
+     }
+
+   PrintFormat("[%s][%s] %s", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), prefix, message);
+  }
+
+//+------------------------------------------------------------------+
+//| Update price cache |
+//+------------------------------------------------------------------+
+void UpdatePriceCache()
+  {
+   lastBidPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   lastAskPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   lastSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert initialization function |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   Log(LOG_LEVEL_INFO, "Iniciando EA - Versão 1.05");
+
+   if(!SymbolInfoInteger(_Symbol, SYMBOL_SELECT))
+     {
+      Log(LOG_LEVEL_ERROR, "Símbolo não está selecionado");
+      return INIT_FAILED;
+     }
+
+   emaHandle = iMA(_Symbol, _Period, EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   if(emaHandle == INVALID_HANDLE)
+     {
+      int error = GetLastError();
+      Log(LOG_LEVEL_ERROR, StringFormat("Erro ao criar EMA (%d)", error));
+      return INIT_FAILED;
+     }
+
+   lastBarTime = iTime(_Symbol, _Period, 0);
+   UpdatePriceCache();
+
+   Log(LOG_LEVEL_INFO, "EA inicializado com sucesso");
+   return INIT_SUCCEEDED;
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   string reasonText;
+   switch(reason)
+     {
+      case REASON_ACCOUNT:
+         reasonText = "Conta alterada";
+         break;
+      case REASON_CHARTCHANGE:
+         reasonText = "Gráfico alterado";
+         break;
+      case REASON_CHARTCLOSE:
+         reasonText = "Gráfico fechado";
+         break;
+      case REASON_CLOSE:
+         reasonText = "Terminal fechado";
+         break;
+      case REASON_INITFAILED:
+         reasonText = "Inicialização falhou";
+         break;
+      case REASON_PARAMETERS:
+         reasonText = "Parâmetros alterados";
+         break;
+      case REASON_RECOMPILE:
+         reasonText = "Recompilado";
+         break;
+      case REASON_REMOVE:
+         reasonText = "EA removido";
+         break;
+      case REASON_TEMPLATE:
+         reasonText = "Template alterado";
+         break;
+      default:
+         reasonText = "Razão desconhecida (" + IntegerToString(reason) + ")";
+     }
+
+   Log(LOG_LEVEL_INFO, "Desinicializando EA. Razão: " + reasonText);
+
+   if(emaHandle != INVALID_HANDLE)
+     {
+      IndicatorRelease(emaHandle);
+      Log(LOG_LEVEL_DEBUG, "Handle EMA liberado");
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   datetime currentTime = iTime(_Symbol, _Period, 0);
+   if(currentTime != lastBarTime)
+     {
+      lastBarTime = currentTime;
+      UpdatePriceCache();
+      ManagePositions();
+
+      if(stopOperations)
+        {
+         Log(LOG_LEVEL_INFO, "Operações foram pausadas. Active operações para reiniciar.");
+         return;
+        }
+        
+      if(lastSpread > max_allowed_spread)
+        {
+         Log(LOG_LEVEL_WARNING, StringFormat("Spread muito alto (%d) - Negociação ignorada", lastSpread));
+         return;
+        }
+
+      ExecuteStrategy();
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Manage positions |
+//+------------------------------------------------------------------+
+void ManagePositions()
+  {
+   CloseAllPositionsIfProfitReached();
+  }
+
+//+------------------------------------------------------------------+
+//| Execute strategy |
+//+------------------------------------------------------------------+
+void ExecuteStrategy()
+  {
+   double ema[1];
+   if(CopyBuffer(emaHandle, 0, 0, 1, ema) <= 0)
+     {
+      int error = GetLastError();
+      Log(LOG_LEVEL_ERROR, StringFormat("Erro ao copiar EMA (%d)", error));
+      return;
+     }
+
+   lastEMAValue = ema[0];
+
+   double price = lastBidPrice;
+   double open = iOpen(NULL, 0, 0);
+   double close = iClose(NULL, 0, 0);
+
+   if(firstTrade)
+     {
+      OpenOppositePositions("First_Time");
+      firstTrade = false;
+      firstTimePrice = close;
+     }
+
+   double positionPrice = GetPositionPriceByComment("First_Time");
+   double distanceInPips = CalculateDistanceInPips(positionPrice, price);
+   double dm = distancePisMultiple * 5;
+
+   if(price > positionPrice && distanceInPips > dm)
+     {
+      OpenPosition(POSITION_TYPE_SELL, "EMA_REVERSE");
+      distancePisMultiple++;
+     }
+   else
+      if(price < positionPrice && distanceInPips > dm)
+        {
+         OpenPosition(POSITION_TYPE_BUY, "EMA_REVERSE");
+         distancePisMultiple++;
+        }
+  }
+
+//+------------------------------------------------------------------+
+//| Open a new position |
+//+------------------------------------------------------------------+
+void OpenPosition(ENUM_POSITION_TYPE type, string comment)
+  {
+   double price = (type == POSITION_TYPE_BUY) ? lastAskPrice : lastBidPrice;
+   double sl = (type == POSITION_TYPE_BUY) ? price - StopLossPoints * _Point : price + StopLossPoints * _Point;
+   double tp = (type == POSITION_TYPE_BUY) ? price + TakeProfitPoints * _Point : price - TakeProfitPoints * _Point;
+
+   if(!ValidateStopLevels(type, price, sl, tp))
+     {
+      Log(LOG_LEVEL_WARNING, "Níveis de stop inválidos. Operação cancelada.");
+      return;
+     }
+
+   if(type == POSITION_TYPE_BUY)
+      Trade.Buy(LotSize, _Symbol, price, sl, tp, comment);
+   else
+      Trade.Sell(LotSize, _Symbol, price, sl, tp, comment);
+
+   if(Trade.ResultRetcode() != TRADE_RETCODE_DONE)
+      Log(LOG_LEVEL_ERROR, StringFormat("Erro ao abrir posição (%d): %s", Trade.ResultRetcode(), Trade.ResultRetcodeDescription()));
+   else
+      Log(LOG_LEVEL_INFO, StringFormat("Posição %s aberta com sucesso. Preço: %.5f, SL: %.5f, TP: %.5f",
+                                       EnumToString(type), price, sl, tp));
+  }
+
+//+------------------------------------------------------------------+
+//| Validate stop levels |
+//+------------------------------------------------------------------+
+bool ValidateStopLevels(ENUM_POSITION_TYPE type, double price, double sl, double tp)
+  {
+   double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   minDist = MathMax(minDist, SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point);
+
+   if(sl != 0 && MathAbs(price - sl) < minDist)
+     {
+      Log(LOG_LEVEL_WARNING, StringFormat("Stop Loss muito próximo do preço. Distância: %.1f pips (mínimo: %.1f)",
+                                          MathAbs(price - sl)/_Point, minDist/_Point));
+      return false;
+     }
+
+   if(tp != 0 && MathAbs(price - tp) < minDist)
+     {
+      Log(LOG_LEVEL_WARNING, StringFormat("Take Profit muito próximo do preço. Distância: %.1f pips (mínimo: %.1f)",
+                                          MathAbs(price - tp)/_Point, minDist/_Point));
+      return false;
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Calculate distance in pips |
+//+------------------------------------------------------------------+
+double CalculateDistanceInPips(double price1, double price2)
+  {
+   if(price1 == 0.0)
+      return 0.0;
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double pipDistance = MathAbs(price1 - price2) / point;
+
+   if(digits == 5 || digits == 3)
+      pipDistance /= 10;
+
+   return pipDistance;
+  }
+
+//+------------------------------------------------------------------+
+//| Get position price by comment |
+//+------------------------------------------------------------------+
+double GetPositionPriceByComment(string commentToFind)
+  {
+   double positionPrice = 0.0;
+   int total = PositionsTotal();
+
+   for(int i = total-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket <= 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      string positionComment = PositionGetString(POSITION_COMMENT);
+      if(positionComment == commentToFind)
+        {
+         positionPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         break;
+        }
+     }
+
+   return positionPrice;
+  }
+
+//+------------------------------------------------------------------+
+//| Open opposite positions |
+//+------------------------------------------------------------------+
+void OpenOppositePositions(string comment)
+  {
+   OpenPosition(POSITION_TYPE_BUY, comment);
+   OpenPosition(POSITION_TYPE_SELL, comment);
+  }
+
+//+------------------------------------------------------------------+
+//| Close all positions if profit reached |
+//+------------------------------------------------------------------+
+void CloseAllPositionsIfProfitReached()
+  {
+   double totalProfit = 0.0;
+   int total = PositionsTotal();
+
+   for(int i = total-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket <= 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      totalProfit += profit;
+     }
+
+   if(totalProfit >= unearnedProfit)
+     {
+      for(int i = total-1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket <= 0 || !PositionSelectByTicket(ticket))
+            continue;
+
+         if(Trade.PositionClose(ticket))
+           {
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            Log(LOG_LEVEL_INFO, StringFormat("[LUCRO ALCANÇADO] Posição %d fechada. Lucro: %.2f", ticket, profit));
+           }
+         else
+           {
+            Log(LOG_LEVEL_ERROR, StringFormat("Erro ao fechar posição %d: %s", ticket, Trade.ResultRetcodeDescription()));
+           }
+        }
+      accumulatedProfit = 0;
+      distancePisMultiple = 1;
+      firstTrade = true;
+
+      Print("Todas as posições foram fechadas porque o lucro total atingiu acima de %.2f", unearnedProfit, ".");
+     }
+  }
+//+------------------------------------------------------------------+
