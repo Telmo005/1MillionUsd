@@ -1,0 +1,523 @@
+//+------------------------------------------------------------------+
+//| Expert Advisor - Versão Limpa e Otimizada |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Telmo Jr."
+#property link "https://www.mql5.com"
+#property version "1.08"
+
+//+------------------------------------------------------------------+
+//| Includes |
+//+------------------------------------------------------------------+
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+
+//+------------------------------------------------------------------+
+//| Níveis de Log |
+//+------------------------------------------------------------------+
+enum ENUM_LOG_LEVEL
+  {
+   LOG_LEVEL_ERROR = 0, // Erro
+   LOG_LEVEL_WARNING = 1, // Aviso
+   LOG_LEVEL_INFO = 2, // Informação
+   LOG_LEVEL_DEBUG = 3 // Depuração
+  };
+
+//+------------------------------------------------------------------+
+//| Parâmetros de Entrada |
+//+------------------------------------------------------------------+
+input double LotSize = 0.05; // Tamanho do lote
+input int StopLossPoints = 10000; // Pontos de Stop Loss
+input int TakeProfitPoints = 10000; // Pontos de Take Profit
+input int EMA_Period = 240; // Período da EMA
+input int MaxAllowedSpread = 5; // Spread máximo permitido
+input bool StopOperations = false; // Parar operações
+input ENUM_LOG_LEVEL LogLevel = LOG_LEVEL_INFO; // Nível de log
+input datetime ExpirationDate = D'2025.06.31 23:59'; // Data de expiração
+input double ProfitAccepted = 0.7;
+//+------------------------------------------------------------------+
+//| Objetos Globais |
+//+------------------------------------------------------------------+
+CTrade Trade;
+int emaHandle;
+
+//+------------------------------------------------------------------+
+//| Estrutura de Estado do Trading |
+//+------------------------------------------------------------------+
+struct TradingState
+  {
+   datetime          lastBarTime; // Tempo da última barra
+   double            accumulatedBalance; // Saldo acumulado
+   bool              activatePositionManager; // Ativar gerenciador de posições
+   double            lastEMAValue; // Último valor da EMA
+   double            lastBidPrice; // Último preço de compra
+   double            lastAskPrice; // Último preço de venda
+   int               lastSpread; // Último spread
+   int               multipleDistanceInPips; // Múltiplo da distância em pips
+   double            lastEmaPrice; // Último preço da EMA
+  };
+
+TradingState state = {0, 0.0, false, 0.0, 0.0, 0.0, 0, 5, 0.0};
+
+//+------------------------------------------------------------------+
+//| Função de Log Personalizada |
+//+------------------------------------------------------------------+
+void Log(ENUM_LOG_LEVEL level, const string message)
+  {
+   if(level > LogLevel)
+      return;
+
+   static const string prefixes[] = {"ERROR", "WARNING", "INFO", "DEBUG"};
+   PrintFormat("[%s][%s] %s", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), prefixes[level], message);
+  }
+
+//+------------------------------------------------------------------+
+//| Atualiza Cache de Preços |
+//+------------------------------------------------------------------+
+void UpdatePriceCache()
+  {
+   state.lastBidPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   state.lastAskPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   state.lastSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   Log(LOG_LEVEL_INFO, StringFormat("Cache de preços atualizado: Bid=%.5f, Ask=%.5f, Spread=%d", state.lastBidPrice, state.lastAskPrice, state.lastSpread));
+  }
+
+//+------------------------------------------------------------------+
+//| Função de Inicialização do Expert |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   Log(LOG_LEVEL_INFO, "Iniciando EA - Versão 1.08");
+
+   if(!SymbolInfoInteger(_Symbol, SYMBOL_SELECT))
+     {
+      Log(LOG_LEVEL_ERROR, "Símbolo não está selecionado");
+      return INIT_FAILED;
+     }
+
+   emaHandle = iMA(_Symbol, _Period, EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   if(emaHandle == INVALID_HANDLE)
+     {
+      Log(LOG_LEVEL_ERROR, StringFormat("Erro ao criar EMA (%d)", GetLastError()));
+      return INIT_FAILED;
+     }
+
+   state.lastBarTime = iTime(_Symbol, _Period, 0);
+   UpdatePriceCache();
+
+   Log(LOG_LEVEL_INFO, "EA inicializado com sucesso");
+   return INIT_SUCCEEDED;
+  }
+
+//+------------------------------------------------------------------+
+//| Função de Desinicialização do Expert |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   static const string reasons[] =
+     {
+      "Conta alterada", "Gráfico alterado", "Gráfico fechado", "Terminal fechado",
+      "Inicialização falhou", "Parâmetros alterados", "Recompilado", "EA removido",
+      "Template alterado"
+     };
+
+   string reasonText = (reason >= 0 && reason < ArraySize(reasons)) ?
+                       reasons[reason] : "Razão desconhecida (" + IntegerToString(reason) + ")";
+
+   Log(LOG_LEVEL_INFO, "Desinicializando EA. Razão: " + reasonText);
+
+   if(emaHandle != INVALID_HANDLE)
+     {
+      IndicatorRelease(emaHandle);
+      Log(LOG_LEVEL_INFO, "Handle EMA liberado");
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Função Tick do Expert |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+
+   if(TimeCurrent() > ExpirationDate)
+     {
+      CloseAllIfTotalProfitPositive();
+      Log(LOG_LEVEL_ERROR, "EA expirada. Operações bloqueadas.");
+      return;
+     }
+
+   datetime currentTime = iTime(_Symbol, _Period, 0);
+   if(currentTime != state.lastBarTime)
+     {
+      state.lastBarTime = currentTime;
+      UpdatePriceCache();
+
+      if(!ValidateTradingConditions())
+         return;
+
+      ExecuteStrategy();
+
+      int positionTotal = PositionsTotal();
+      Comment("Saldo Acumulado: ", DoubleToString(state.accumulatedBalance, 2), " Total de posições: ", positionTotal);
+
+     }
+
+  }
+
+//+------------------------------------------------------------------+
+//| Valida Condições de Trading |
+//+------------------------------------------------------------------+
+bool ValidateTradingConditions()
+  {
+   Log(LOG_LEVEL_INFO, "Validando condições de trading");
+
+   if(TimeCurrent() > ExpirationDate)
+     {
+      CloseAllIfTotalProfitPositive();
+      Log(LOG_LEVEL_ERROR, "EA expirada. Operações bloqueadas.");
+      return false;
+     }
+
+   if(StopOperations)
+     {
+      CloseAllIfTotalProfitPositive();
+      Log(LOG_LEVEL_INFO, "Operações pausadas pelo usuário.");
+      return false;
+     }
+
+   if(state.lastSpread > MaxAllowedSpread)
+     {
+      CloseAllIfTotalProfitPositive();
+      Log(LOG_LEVEL_WARNING, StringFormat("Spread alto (%d) - Negociação ignorada", state.lastSpread));
+      return false;
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void ExecuteStrategy()
+  {
+
+   double ema[2];
+   if(CopyBuffer(emaHandle, 0, 0, 2, ema) <= 0)
+     {
+      Log(LOG_LEVEL_ERROR, StringFormat("Erro ao copiar EMA (%d)", GetLastError()));
+      return;
+     }
+   state.lastEMAValue = ema[1];
+
+   double highPrice = iHigh(NULL, 0, 1);
+   double lowPrice = iLow(NULL, 0, 1);
+   double closePrice1 = iClose(NULL, 0, 1);
+   double openPrice1 = iOpen(NULL, 0, 1);
+
+   double distanceInPips = CalculateDistanceInPips(state.lastEMAValue, closePrice1);
+   if(distanceInPips > 10)
+     {
+      ClosePositionsWithCommentAndType("EMA_CROSSING", POSITION_TYPE_SELL);
+      ClosePositionsWithCommentAndType("EMA_CROSSING", POSITION_TYPE_BUY);
+     }
+
+   bool isCrossingEma = lowPrice < state.lastEMAValue && highPrice > state.lastEMAValue;
+
+   CloseProfitablePositionsWithComment("EMA_TREND");
+   CloseProfitablePositionsWithComment("EMA_REV_TREND");
+
+   if(isCrossingEma)
+     {
+      state.lastEmaPrice = state.lastEMAValue;
+      state.multipleDistanceInPips = 5;
+      CloseAllPositions();
+
+      if(closePrice1 > openPrice1)
+        {
+         Log(LOG_LEVEL_INFO, "EMA cruzada para [CIMA].");
+         OpenPosition(POSITION_TYPE_BUY, "EMA_CROSSING");
+         OpenPosition(POSITION_TYPE_BUY, "EMA_CROSSING");
+         OpenPosition(POSITION_TYPE_SELL, "EMA_CROSSING");
+        }
+      else
+        {
+         Log(LOG_LEVEL_INFO, "EMA cruzada para [BAIXO].");
+         OpenPosition(POSITION_TYPE_SELL, "EMA_CROSSING");
+         OpenPosition(POSITION_TYPE_SELL, "EMA_CROSSING");
+         OpenPosition(POSITION_TYPE_BUY, "EMA_CROSSING");
+        }
+     }
+
+   if(closePrice1 > state.lastEMAValue)
+     {
+      if(IsReversalTopV())
+        {
+         Log(LOG_LEVEL_INFO, "Reversão de TOPO V detectada.");
+         ClosePositionsWithCommentAndType("EMA_CROSSING", POSITION_TYPE_SELL);
+
+         if(distanceInPips < 10)
+            OpenPosition(POSITION_TYPE_BUY, "EMA_TREND");
+
+         if(distanceInPips > 10)
+            OpenPosition(POSITION_TYPE_SELL, "EMA_REV_TREND");
+        }
+
+      if(distanceInPips >= state.multipleDistanceInPips)
+        {
+         Log(LOG_LEVEL_INFO, "Distância em pips maior ou igual ao múltiplo da distância. Abrindo posição de venda.");
+         OpenPosition(POSITION_TYPE_SELL, "EMA_TREND_BALANCE");
+         state.multipleDistanceInPips += 5;
+        }
+     }
+
+   if(closePrice1 < state.lastEMAValue)
+     {
+      if(IsReversalBottomV())
+        {
+         Log(LOG_LEVEL_DEBUG, "Reversão de FUNDO V detectada.");
+         ClosePositionsWithCommentAndType("EMA_CROSSING", POSITION_TYPE_BUY);
+
+         if(distanceInPips < 10)
+            OpenPosition(POSITION_TYPE_SELL, "EMA_TREND");
+
+         if(distanceInPips > 10)
+            OpenPosition(POSITION_TYPE_BUY, "EMA_REV_TREND");
+        }
+
+      if(distanceInPips >= state.multipleDistanceInPips)
+        {
+         Log(LOG_LEVEL_INFO, "Distância em pips maior ou igual ao múltiplo da distância. Abrindo posição de compra. ");
+         OpenPosition(POSITION_TYPE_BUY, "EMA_TREND_BALANCE");
+         state.multipleDistanceInPips += 5;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Abrir Nova Posição |
+//+------------------------------------------------------------------+
+void OpenPosition(ENUM_POSITION_TYPE type, string comment)
+  {
+
+   double price = (type == POSITION_TYPE_BUY) ? state.lastAskPrice : state.lastBidPrice;
+   double sl = (type == POSITION_TYPE_BUY) ?
+               price - StopLossPoints * _Point :
+               price + StopLossPoints * _Point;
+   double tp = (type == POSITION_TYPE_BUY) ?
+               price + TakeProfitPoints * _Point :
+               price - TakeProfitPoints * _Point;
+
+   if(!ValidateStopLevels(type, price, sl, tp))
+      return;
+
+   if(type == POSITION_TYPE_BUY)
+     {
+      if(!Trade.Buy(LotSize, _Symbol, price, sl, tp, comment))
+        {
+         Log(LOG_LEVEL_ERROR, StringFormat("Erro ao abrir posição de compra (%d): %s",
+                                           Trade.ResultRetcode(), Trade.ResultRetcodeDescription()));
+        }
+     }
+   else
+     {
+      if(!Trade.Sell(LotSize, _Symbol, price, sl, tp, comment))
+        {
+         Log(LOG_LEVEL_ERROR, StringFormat("Erro ao abrir posição de venda (%d): %s",
+                                           Trade.ResultRetcode(), Trade.ResultRetcodeDescription()));
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Validar Níveis de Stop |
+//+------------------------------------------------------------------+
+bool ValidateStopLevels(ENUM_POSITION_TYPE type, double price, double sl, double tp)
+  {
+   double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   minDist = MathMax(minDist, SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point);
+
+   if(sl != 0 && MathAbs(price - sl) < minDist)
+     {
+      Log(LOG_LEVEL_WARNING, "Stop Loss muito próximo do preço");
+      return false;
+     }
+
+   if(tp != 0 && MathAbs(price - tp) < minDist)
+     {
+      Log(LOG_LEVEL_WARNING, "Take Profit muito próximo do preço");
+      return false;
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Fechar Posições Lucrativas com Comentário Específico |
+//+------------------------------------------------------------------+
+void CloseProfitablePositionsWithComment(string comment)
+  {
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         string posComment = PositionGetString(POSITION_COMMENT);
+         if(posComment == comment && PositionGetDouble(POSITION_PROFIT) > ProfitAccepted)
+           {
+            if(Trade.PositionClose(ticket))
+              {
+               double profit = PositionGetDouble(POSITION_PROFIT);
+               state.accumulatedBalance += profit;
+               Log(LOG_LEVEL_INFO, StringFormat("Posição fechada com lucro: Ticket=%d, Lucro=%.2f, Saldo acumulado=%.2f",
+                                                ticket, profit, state.accumulatedBalance));
+              }
+            else
+              {
+               Log(LOG_LEVEL_ERROR, StringFormat("Erro ao fechar posição %d", ticket));
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Fechar Posições com Comentário Específico e Tipo de Operação |
+//+------------------------------------------------------------------+
+void ClosePositionsWithCommentAndType(string comment, ENUM_POSITION_TYPE positionType = WRONG_VALUE)
+  {
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         string posComment = PositionGetString(POSITION_COMMENT);
+         ENUM_POSITION_TYPE currentPositionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+         if(posComment == comment && (positionType == WRONG_VALUE || currentPositionType == positionType))
+           {
+            if(Trade.PositionClose(ticket))
+              {
+               double profit = PositionGetDouble(POSITION_PROFIT);
+               state.accumulatedBalance += profit;
+               Log(LOG_LEVEL_INFO, StringFormat("Posição fechada com lucro: Ticket=%d, Lucro=%.2f, Saldo acumulado=%.2f",
+                                                ticket, profit, state.accumulatedBalance));
+              }
+            else
+              {
+               Log(LOG_LEVEL_ERROR, StringFormat("Erro ao fechar posição %d", ticket));
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Verificar Padrões de Reversão (Topo V) |
+//+------------------------------------------------------------------+
+bool IsReversalTopV()
+  {
+   double closePrice1 = iClose(NULL, 0, 1);
+   double closePrice2 = iClose(NULL, 0, 2);
+   double closePrice3 = iClose(NULL, 0, 3);
+
+   bool isReversal = (closePrice1 > closePrice2 && closePrice2 < closePrice3);
+   Log(LOG_LEVEL_INFO, StringFormat("Verificação de reversão topo V: %s", isReversal ? "Verdadeiro" : "Falso"));
+   return isReversal;
+  }
+
+//+------------------------------------------------------------------+
+//| Verificar Padrões de Reversão (Fundo V) |
+//+------------------------------------------------------------------+
+bool IsReversalBottomV()
+  {
+   double closePrice1 = iClose(NULL, 0, 1);
+   double closePrice2 = iClose(NULL, 0, 2);
+   double closePrice3 = iClose(NULL, 0, 3);
+
+   bool isReversal = (closePrice1 < closePrice2 && closePrice2 > closePrice3);
+   Log(LOG_LEVEL_INFO, StringFormat("Verificação de reversão fundo V: %s", isReversal ? "Verdadeiro" : "Falso"));
+   return isReversal;
+  }
+
+//+------------------------------------------------------------------+
+//| Calcular Distância em Pips |
+//+------------------------------------------------------------------+
+double CalculateDistanceInPips(double price1, double price2)
+  {
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double pipDistance = MathAbs(price1 - price2) / point;
+
+   if(digits == 5 || digits == 3)
+      pipDistance /= 10;
+
+   Log(LOG_LEVEL_INFO, StringFormat("Distância em pips calculada: %.2f", pipDistance));
+   return pipDistance;
+  }
+
+//+------------------------------------------------------------------+
+//| Fechar todas as posições se o lucro total for positivo |
+//+------------------------------------------------------------------+
+void CloseAllIfTotalProfitPositive()
+  {
+
+   double totalProfit = 0.0;
+
+// Calcula o lucro total de todas as posições abertas
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         totalProfit += profit;
+        }
+     }
+
+// Se o lucro total for positivo, fecha todas as posições
+   if(totalProfit > ProfitAccepted)
+     {
+      Log(LOG_LEVEL_INFO, StringFormat("Lucro total positivo: %.2f. Fechando todas as posições.", totalProfit));
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket > 0 && PositionSelectByTicket(ticket))
+           {
+            if(Trade.PositionClose(ticket))
+              {
+               Log(LOG_LEVEL_INFO, StringFormat("Posição %d fechada com lucro total positivo: %.2f", ticket, totalProfit));
+              }
+            else
+              {
+               Log(LOG_LEVEL_ERROR, StringFormat("Erro ao fechar posição %d", ticket));
+              }
+           }
+        }
+     }
+   else
+     {
+      Log(LOG_LEVEL_INFO, StringFormat("Lucro total não é positivo: %.2f. Nenhuma posição fechada.", totalProfit));
+     }
+  }
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Fecha todas as posições abertas                                  |
+//+------------------------------------------------------------------+
+void CloseAllPositions()
+  {
+   if(PositionsTotal() == 0)
+      return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0)
+        {
+         Trade.PositionClose(ticket);
+        }
+     }
+  }
+//+------------------------------------------------------------------+
