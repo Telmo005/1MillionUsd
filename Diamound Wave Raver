@@ -1,0 +1,361 @@
+//+------------------------------------------------------------------+
+//| Expert Advisor - Estratégia Dinâmica Otimizada                   |
+//| Copyright 2025, Telmo Jr.                                       |
+//| https://www.mql5.com                                             |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Telmo Jr."
+#property link      "https://www.mql5.com"
+#property version   "1.20"
+
+#include <Trade\Trade.mqh>
+
+//+------------------------------------------------------------------+
+//| Input Parameters                                                 |
+//+------------------------------------------------------------------+
+input double   LotSize            = 0.01;     // Tamanho do lote
+input int      StopLossPoints     = 10000;    // Pontos de Stop Loss
+input int      TakeProfitPoints   = 10000;    // Pontos de Take Profit
+input int      MaxAllowedSpread   = 5;        // Spread máximo permitido
+input double   TotalBars          = 200;
+input bool     StopOperations     = false;    // Parar operações
+input datetime ExpirationDate     = D'2025.06.31 23:59'; // Data de expiração
+input double   ProfitAccepted     = 0.7;      // Lucro aceitável para fechar
+
+//+------------------------------------------------------------------+
+//| Trading State Structure                                          |
+//+------------------------------------------------------------------+
+struct TradingState
+  {
+   datetime          lastBarTime;
+   bool              isFirstBuy;
+   bool              isFirstSell;
+  };
+
+//+------------------------------------------------------------------+
+//| Global Variables                                                 |
+//+------------------------------------------------------------------+
+CTrade Trade;
+TradingState state = {0, true, true};
+
+//+------------------------------------------------------------------+
+//| Expert Initialization Function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   if(!SymbolInfoInteger(_Symbol, SYMBOL_SELECT))
+     {
+      Print("Falha ao selecionar o símbolo");
+      return INIT_FAILED;
+     }
+
+   state.lastBarTime = iTime(_Symbol, _Period, 0);
+   return INIT_SUCCEEDED;
+  }
+
+//+------------------------------------------------------------------+
+//| Expert Deinitialization Function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+  }
+
+//+------------------------------------------------------------------+
+//| Expert Tick Function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   if(PositionsTotal() == 0 || GetTotalPositionsProfit() == 0)
+      newReset();
+
+   if(CalculateTotalProfit() > 1)
+      CloseAllPositions();
+
+   if(TimeCurrent() > ExpirationDate || StopOperations)
+      return;
+
+   datetime currentTime = iTime(_Symbol, _Period, 0);
+   if(currentTime != state.lastBarTime)
+     {
+      state.lastBarTime = currentTime;
+
+      if(ValidateTradingConditions())
+         ExecuteTradingStrategy();
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Validate Trading Conditions                                      |
+//+------------------------------------------------------------------+
+bool ValidateTradingConditions()
+  {
+   int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   if(spread > MaxAllowedSpread)
+     {
+      Print("Spread muito alto: ", spread);
+      return false;
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Execute Trading Strategy                                         |
+//+------------------------------------------------------------------+
+void ExecuteTradingStrategy()
+  {
+   double close = iClose(NULL, 0, 1);
+   double closeHigh = iHigh(NULL, 0, 5);
+   double closeLow = iLow(NULL, 0, 5);
+
+// Desenha as linhas de suporte e resistência
+   DrawSupportResistanceLines();
+
+   bool isInSideLines = close > closeLow && close < closeHigh;
+   CloseProfitablePositionsByType(POSITION_TYPE_SELL, "SELL", 0);
+   CloseProfitablePositionsByType(POSITION_TYPE_BUY, "BUY", 0);
+
+   if(close > closeHigh)
+     {
+      Print("Fechamento acima da Linha VERMELHA");
+      ClosePositionsByType(POSITION_TYPE_SELL, "SELL");
+      ClosePositionsByType(POSITION_TYPE_SELL, "SELL_TREND");
+
+      if(!isInSideLines)
+         OpenPosition(POSITION_TYPE_BUY, "BUY");
+
+      if(!IsTrendPositionOpen())
+         OpenPosition(POSITION_TYPE_BUY, "BUY_TREND");
+
+     }
+   if(close < closeLow)
+     {
+      Print("Fechamento abaixo da Linha AZUL");
+      ClosePositionsByType(POSITION_TYPE_BUY, "BUY");
+      ClosePositionsByType(POSITION_TYPE_BUY, "BUY_TREND");
+
+      if(!isInSideLines)
+         OpenPosition(POSITION_TYPE_SELL, "SELL");
+
+      if(!IsTrendPositionOpen())
+         OpenPosition(POSITION_TYPE_SELL, "SELL_TREND");
+
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Draw Support/Resistance Lines                                    |
+//+------------------------------------------------------------------+
+void DrawSupportResistanceLines()
+  {
+   double price1 = iLow(NULL, 0, 5);
+   datetime time1 = iTime(NULL, 0, 5);
+   double price2 = iLow(NULL, 0, 5);
+   datetime time2 = iTime(NULL, 0, 0);
+
+   DrawTrendLine("BlueLine", time1, price1, time2, price2, clrBlue, "BlueLine");
+
+   price1 = iHigh(NULL, 0, 5);
+   time1 = iTime(NULL, 0, 5);
+   price2 = iHigh(NULL, 0, 5);
+   time2 = iTime(NULL, 0, 0);
+
+   DrawTrendLine("RedLine", time1, price1, time2, price2, clrRed, "RedLine");
+  }
+
+//+------------------------------------------------------------------+
+//| Draw Trend Line                                                  |
+//+------------------------------------------------------------------+
+void DrawTrendLine(string name, datetime t1, double p1, datetime t2, double p2,
+                   color clr, string desc="")
+  {
+   if(ObjectFind(0, name) >= 0)
+      ObjectDelete(0, name);
+
+   ObjectCreate(0, name, OBJ_TREND, 0, t1, p1, t2, p2);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetString(0, name, OBJPROP_TEXT, desc);
+   ObjectSetInteger(0, name, OBJPROP_RAY, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+  }
+
+//+------------------------------------------------------------------+
+//| Open New Position                                                |
+//+------------------------------------------------------------------+
+void OpenPosition(ENUM_POSITION_TYPE type, string comment)
+  {
+   double price = type == POSITION_TYPE_BUY ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                  : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double sl = type == POSITION_TYPE_BUY ? price - StopLossPoints * _Point
+               : price + StopLossPoints * _Point;
+   double tp = type == POSITION_TYPE_BUY ? price + TakeProfitPoints * _Point
+               : price - TakeProfitPoints * _Point;
+
+   if(type == POSITION_TYPE_BUY)
+     {
+      Trade.Buy(LotSize, _Symbol, price, sl, tp, comment);
+     }
+   else
+     {
+      Trade.Sell(LotSize, _Symbol, price, sl, tp, comment);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Close All Positions                                              |
+//+------------------------------------------------------------------+
+void CloseAllPositions()
+  {
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         Trade.PositionClose(ticket);
+        }
+     }
+   newReset();
+  }
+
+//+------------------------------------------------------------------+
+//| Fecha Posições por Tipo e Comentário                            |
+//+------------------------------------------------------------------+
+void ClosePositionsByType(ENUM_POSITION_TYPE type, string comment = "")
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         ENUM_POSITION_TYPE currentType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         string currentComment = PositionGetString(POSITION_COMMENT);
+
+         if(currentType == type && (comment == "" || currentComment == comment))
+           {
+            Trade.PositionClose(ticket);
+            Print("Posição ", ticket, " fechada");
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Fecha Posições Lucrativas por Tipo e Comentário                  |
+//+------------------------------------------------------------------+
+void CloseProfitablePositionsByType(ENUM_POSITION_TYPE type, string comment = "", double accepedProfit = 1.0)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         ENUM_POSITION_TYPE currentType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         string currentComment = PositionGetString(POSITION_COMMENT);
+
+         if(currentType == type && (comment == "" || currentComment == comment))
+           {
+            if(profit > accepedProfit)
+              {
+               Trade.PositionClose(ticket);
+               Print("Posição ", ticket, " fechada com lucro: ", profit);
+              }
+           }
+        }
+     }
+  }
+//+------------------------------------------------------------------+
+//| Calculate Total Profit                                           |
+//+------------------------------------------------------------------+
+double CalculateTotalProfit()
+  {
+   double total = 0.0;
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         total += PositionGetDouble(POSITION_PROFIT);
+        }
+     }
+   return total;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void newReset()
+  {
+   state.isFirstBuy = true;
+   state.isFirstSell = true;
+  }
+
+//+------------------------------------------------------------------+
+//| Retorna o lucro/prejuízo total das posições abertas              |
+//+------------------------------------------------------------------+
+double GetTotalPositionsProfit()
+  {
+   double totalProfit = 0.0;
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         totalProfit += PositionGetDouble(POSITION_PROFIT);
+        }
+     }
+
+   return totalProfit;
+  }
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Retorna a quantidade de posições por tipo e comentário           |
+//+------------------------------------------------------------------+
+int GetPositionsCountByTypeAndComment(ENUM_POSITION_TYPE type, string comment)
+  {
+   int count = 0;
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         string positionComment = PositionGetString(POSITION_COMMENT);
+
+         if(positionType == type && positionComment == comment)
+           {
+            count++;
+           }
+        }
+     }
+
+   return count;
+  }
+//+------------------------------------------------------------------+
+
+
+//+------------------------------------------------------------------+
+//| Verifica se já existe uma posição aberta de SELL_TREND ou BUY_TREND |
+//+------------------------------------------------------------------+
+bool IsTrendPositionOpen()
+  {
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         string comment = PositionGetString(POSITION_COMMENT);
+         if(comment == "SELL_TREND" || comment == "BUY_TREND")
+           {
+            return true;
+           }
+        }
+     }
+   return false;
+  }
+//+------------------------------------------------------------------+
