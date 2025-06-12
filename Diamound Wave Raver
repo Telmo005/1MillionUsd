@@ -12,7 +12,7 @@
 //+------------------------------------------------------------------+
 //| Input Parameters                                                 |
 //+------------------------------------------------------------------+
-input double   LotSize            = 0.01;     // Tamanho do lote
+input double   LotSize            = 0.05;     // Tamanho do lote
 input int      StopLossPoints     = 10000;    // Pontos de Stop Loss
 input int      TakeProfitPoints   = 10000;    // Pontos de Take Profit
 input int      MaxAllowedSpread   = 5;        // Spread máximo permitido
